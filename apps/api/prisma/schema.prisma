@@ -1,0 +1,148 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum RoleUtilisateur {
+  ADMIN
+  EMPLOYE
+}
+
+enum StockMovementType {
+  IN
+  CORRECTION
+  SALE
+}
+
+model PointDeVente {
+  id           Int           @id @default(autoincrement())
+  nom          String
+  adresse      String?
+  telephone    String?
+  utilisateurs Utilisateur[]
+  stocks       Stock[]
+  stockMovements StockMovement[]
+  ventes       Vente[]
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+}
+
+model Utilisateur {
+  id             Int             @id @default(autoincrement())
+  nom            String
+  email          String          @unique
+  motDePasse     String
+  role           RoleUtilisateur @default(EMPLOYE)
+  estActif       Boolean         @default(true)
+  pointDeVenteId Int?
+  pointDeVente   PointDeVente?   @relation(fields: [pointDeVenteId], references: [id])
+  ventes         Vente[]
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  @@index([pointDeVenteId])
+}
+
+model Fournisseur {
+  id        Int       @id @default(autoincrement())
+  nom       String
+  email     String?   @unique
+  telephone String?
+  adresse   String?
+  produits  Produit[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+}
+
+model Produit {
+  id            Int          @id @default(autoincrement())
+  codeBarres    String       @unique
+  nom           String
+  categorie     String
+  prixAchat     Decimal      @db.Decimal(10, 2)
+  prixVente     Decimal      @db.Decimal(10, 2)
+  seuilMinimum  Int          @default(0)
+  estActif      Boolean      @default(true)
+  fournisseurId Int?
+  fournisseur   Fournisseur? @relation(fields: [fournisseurId], references: [id])
+  stocks        Stock[]
+  stockMovements StockMovement[]
+  lignesVente   VenteLigne[]
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@index([categorie])
+  @@index([fournisseurId])
+}
+
+model Stock {
+  id             Int          @id @default(autoincrement())
+  produitId      Int
+  pointDeVenteId Int
+  quantite       Int          @default(0)
+  produit        Produit      @relation(fields: [produitId], references: [id], onDelete: Cascade)
+  pointDeVente   PointDeVente @relation(fields: [pointDeVenteId], references: [id], onDelete: Cascade)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([produitId, pointDeVenteId])
+  @@index([produitId])
+  @@index([pointDeVenteId])
+}
+
+model StockMovement {
+  id             Int               @id @default(autoincrement())
+  produitId      Int
+  pointDeVenteId Int
+  quantite       Int
+  type           StockMovementType
+  reason         String?
+  createdAt      DateTime          @default(now())
+  produit        Produit           @relation(fields: [produitId], references: [id], onDelete: Cascade)
+  pointDeVente   PointDeVente      @relation(fields: [pointDeVenteId], references: [id], onDelete: Cascade)
+
+  @@index([produitId])
+  @@index([pointDeVenteId])
+  @@index([type])
+  @@index([createdAt])
+}
+
+model Vente {
+  id             Int          @id @default(autoincrement())
+  numeroTicket   String       @unique
+  total          Decimal      @db.Decimal(10, 2)
+  paymentMethod  String       @default("cash")
+  dateVente      DateTime     @default(now())
+  pointDeVenteId Int
+  utilisateurId  Int
+  pointDeVente   PointDeVente @relation(fields: [pointDeVenteId], references: [id])
+  utilisateur    Utilisateur  @relation(fields: [utilisateurId], references: [id])
+  lignes         VenteLigne[]
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([dateVente])
+  @@index([pointDeVenteId])
+  @@index([pointDeVenteId, dateVente])
+  @@index([utilisateurId])
+}
+
+model VenteLigne {
+  id           Int      @id @default(autoincrement())
+  venteId      Int
+  produitId    Int
+  quantite     Int
+  prixUnitaire Decimal  @db.Decimal(10, 2)
+  sousTotal    Decimal  @db.Decimal(10, 2)
+  vente        Vente    @relation(fields: [venteId], references: [id], onDelete: Cascade)
+  produit      Produit  @relation(fields: [produitId], references: [id])
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([venteId])
+  @@index([produitId])
+}
