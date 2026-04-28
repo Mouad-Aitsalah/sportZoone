@@ -117,6 +117,11 @@ router.get(
 );
 router.get("/reports", roleMiddleware("ADMIN"), asyncHandler(apiController.getReports));
 router.get(
+  "/analytics",
+  roleMiddleware("ADMIN"),
+  asyncHandler(apiController.getAnalytics)
+);
+router.get(
   "/reports/auto-status",
   roleMiddleware("ADMIN"),
   asyncHandler(apiController.getAutoReportStatus)

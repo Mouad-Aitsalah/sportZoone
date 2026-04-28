@@ -4,6 +4,7 @@ import PageHeader from "../components/PageHeader";
 import PaymentModal from "../components/PaymentModal";
 import SectionCard from "../components/SectionCard";
 import api from "../services/api";
+import { savePendingSale } from "../services/offlineDb";
 import { getCurrentUser } from "../store/authStore";
 import { useCart } from "../store/cartStore";
 import { formatCurrencyDh } from "../utils/formatters";
@@ -17,6 +18,8 @@ const DEFAULT_CUSTOMER = {
   credit: 0,
   active: true,
 };
+
+const PRODUCTS_CACHE_KEY = "products";
 
 const getCollection = (payload, keys = []) => {
   if (Array.isArray(payload)) {
@@ -65,6 +68,9 @@ function PosPage() {
       "Scannez un code-barres ou utilisez l'ajout rapide pour remplir le panier.",
   });
   const [isPaymentOpen, setIsPaymentOpen] = useState(false);
+  const [isOnline, setIsOnline] = useState(
+    typeof navigator === "undefined" ? true : navigator.onLine
+  );
   const currentUser = getCurrentUser();
   const isAdmin = currentUser?.role === "admin";
   const {
@@ -119,6 +125,26 @@ function PosPage() {
     : [selectedCustomer];
 
   useEffect(() => {
+    const handleOnline = () => {
+      console.log("BACK ONLINE");
+      setIsOnline(true);
+    };
+
+    const handleOffline = () => {
+      console.log("GO OFFLINE");
+      setIsOnline(false);
+    };
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
+
+  useEffect(() => {
     let isMounted = true;
 
     async function fetchProducts() {
@@ -131,14 +157,24 @@ function PosPage() {
 
         if (isMounted) {
           setProducts(list);
+          localStorage.setItem(PRODUCTS_CACHE_KEY, JSON.stringify(list));
         }
       } catch (error) {
         if (isMounted) {
+          const cachedProducts = JSON.parse(
+            localStorage.getItem(PRODUCTS_CACHE_KEY) || "[]"
+          );
+
+          if (cachedProducts.length) {
+            setProducts(cachedProducts);
+          }
+
           setNotice({
             type: "warning",
-            message:
-              error.response?.data?.message ||
-              "Impossible de charger la liste rapide des produits.",
+            message: cachedProducts.length
+              ? "Connexion indisponible. Produits charges depuis le cache local."
+              : error.response?.data?.message ||
+                "Impossible de charger la liste rapide des produits.",
           });
         }
       } finally {
@@ -278,7 +314,6 @@ function PosPage() {
       try {
         setIsLoadingCustomers(true);
         setCustomerNotice({ type: "", message: "" });
-
         const response = await api.get("/customers");
         const list = getCollection(response.data, ["data", "customers"]);
 
@@ -368,10 +403,97 @@ function PosPage() {
   const refreshProducts = async () => {
     try {
       const response = await api.get("/products");
-      setProducts(Array.isArray(response.data) ? response.data : response.data?.data || []);
+      const list = Array.isArray(response.data)
+        ? response.data
+        : response.data?.data || [];
+
+      setProducts(list);
+      localStorage.setItem(PRODUCTS_CACHE_KEY, JSON.stringify(list));
     } catch (error) {
       // Keep the cashier flow stable even if the background refresh fails.
     }
+  };
+
+  const getCachedProducts = () => {
+    try {
+      return JSON.parse(localStorage.getItem(PRODUCTS_CACHE_KEY) || "[]");
+    } catch (error) {
+      return [];
+    }
+  };
+
+  const generateLocalSaleId = () => {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+
+    return `local-sale-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+  };
+
+  const buildSalePayload = (method) => {
+    return {
+      storeId: activeStoreId,
+      cashRegisterId: activeCashRegisterId,
+      userId: currentUser?.id,
+      customerId: selectedCustomer?.id || DEFAULT_CUSTOMER.id,
+      paymentMethod: method,
+      items: items.map((item) => ({
+        productId: item.id,
+        quantity: item.quantity,
+        unitPrice: item.salePrice ?? item.price,
+      })),
+      total: totalAmount,
+    };
+  };
+
+  const buildOfflineSalePayload = (method, userId) => {
+    const hasKnownCustomer =
+      Number(selectedCustomer?.customerNumber || 1) !== 1 &&
+      Number(selectedCustomer?.id || 0) > 0;
+
+    return {
+      localId: generateLocalSaleId(),
+      storeId: activeStoreId,
+      caisseId: activeCashRegisterId,
+      userId,
+      ...(hasKnownCustomer
+        ? {
+            clientId: selectedCustomer.id,
+          }
+        : {}),
+      items: items.map((item) => ({
+        productId: item.id,
+        quantity: item.quantity,
+        unitPrice: item.salePrice ?? item.price,
+      })),
+      total: totalAmount,
+      paymentMethod: method,
+      createdAt: new Date().toISOString(),
+      syncStatus: "pending",
+    };
+  };
+
+  const addOfflineProductToCart = (product) => {
+    if (!product?.active) {
+      setNotice({
+        type: "warning",
+        message: `${product?.name || "Ce produit"} est inactif et ne peut pas etre ajoute.`,
+      });
+      return false;
+    }
+
+    addItem({
+      ...product,
+      price: product.price ?? product.salePrice ?? 0,
+      salePrice: product.salePrice ?? product.price ?? 0,
+      stock: Number.POSITIVE_INFINITY,
+      storeName: activeStoreName || product.storeName || null,
+    });
+    setNotice({
+      type: "success",
+      message: `${product.name} ajoute au panier depuis le cache hors ligne.`,
+    });
+    return true;
   };
 
   const ensureStoreSelected = () => {
@@ -437,6 +559,39 @@ function PosPage() {
       return;
     }
 
+    if (!isOnline) {
+      const cachedProducts = getCachedProducts();
+
+      if (!cachedProducts.length) {
+        setNotice({
+          type: "warning",
+          message:
+            "Aucun produit disponible hors ligne. Rechargez l'application en ligne une fois.",
+        });
+        return;
+      }
+
+      const product = cachedProducts.find(
+        (item) => String(item.barcode || "").trim() === trimmedBarcode
+      );
+
+      if (!product) {
+        setNotice({
+          type: "error",
+          message: "Produit non disponible hors ligne.",
+        });
+        return;
+      }
+
+      const added = addOfflineProductToCart(product);
+
+      if (added) {
+        setBarcode("");
+      }
+
+      return;
+    }
+
     try {
       setIsSearchingBarcode(true);
 
@@ -498,6 +653,36 @@ function PosPage() {
       return;
     }
 
+    if (!isOnline) {
+      const cachedProducts = getCachedProducts();
+
+      if (!cachedProducts.length) {
+        setNotice({
+          type: "warning",
+          message:
+            "Aucun produit disponible hors ligne. Rechargez l'application en ligne une fois.",
+        });
+        return;
+      }
+
+      const cachedProduct =
+        cachedProducts.find((item) => item.id === product.id) ||
+        cachedProducts.find(
+          (item) => String(item.barcode || "") === String(product.barcode || "")
+        );
+
+      if (!cachedProduct) {
+        setNotice({
+          type: "error",
+          message: "Produit non disponible hors ligne.",
+        });
+        return;
+      }
+
+      addOfflineProductToCart(cachedProduct);
+      return;
+    }
+
     try {
       setIsSearchingBarcode(true);
 
@@ -544,36 +729,41 @@ function PosPage() {
         message:
           "Utilisateur introuvable. Reconnectez-vous avant de valider la vente.",
       });
-      return;
+      return false;
+    }
+
+    if (method === "credit" && (selectedCustomer?.customerNumber || 1) === 1) {
+      setNotice({
+        type: "error",
+        message: 'Le paiement a credit n\'est pas autorise pour "Client inconnu".',
+      });
+      return false;
     }
 
     if (!activeStoreId || !activeCashRegisterId) {
-      setIsPaymentOpen(false);
       setNotice({
         type: "error",
         message:
-          "Un point de vente actif et une caisse active sont obligatoires pour creer une vente.",
+          !activeStoreId
+            ? "Champ manquant: storeId"
+            : "Champ manquant: caisseId",
       });
-      return;
+      return false;
     }
 
-    const salePayload = {
-      storeId: activeStoreId,
-      cashRegisterId: activeCashRegisterId,
-      userId,
-      customerId: selectedCustomer?.id || DEFAULT_CUSTOMER.id,
-      paymentMethod: method,
-      items: items.map((item) => ({
-        productId: item.id,
-        quantity: item.quantity,
-        unitPrice: item.salePrice ?? item.price,
-      })),
-      total: totalAmount,
-    };
+    if (!items.length) {
+      setNotice({
+        type: "error",
+        message: "Champ manquant: items",
+      });
+      return false;
+    }
+
+    const salePayload = buildSalePayload(method);
 
     try {
       setIsSubmittingSale(true);
-
+      console.log("TRY ONLINE SALE");
       const response = await api.post("/sales", salePayload);
       const ticketNumber =
         response.data?.ticketNumber ||
@@ -589,20 +779,39 @@ function PosPage() {
           : "Paiement confirme avec succes.",
       });
       await refreshProducts();
+      return true;
     } catch (error) {
-      const backendMessage =
-        error.response?.data?.message ||
-        error.response?.data?.error ||
-        (typeof error.response?.data?.details === "string"
-          ? error.response.data.details
-          : "");
+      console.error("API FAILED → OFFLINE MODE", error);
 
-      setNotice({
-        type: "error",
-        message:
-          backendMessage ||
-          "Impossible de finaliser la vente. Veuillez reessayer.",
-      });
+      const offlineSale = buildOfflineSalePayload(method, userId);
+
+      try {
+        console.log("OFFLINE FALLBACK");
+        await savePendingSale(offlineSale);
+        clearCart();
+        setIsPaymentOpen(false);
+        setNotice({
+          type: "success",
+          message: "Vente enregistree hors ligne.",
+        });
+        return true;
+      } catch (offlineError) {
+        const backendMessage =
+          error.response?.data?.message ||
+          error.response?.data?.error ||
+          (typeof error.response?.data?.details === "string"
+            ? error.response.data.details
+            : "");
+
+        setNotice({
+          type: "error",
+          message:
+            backendMessage ||
+            offlineError.message ||
+            "Impossible de finaliser la vente. Veuillez reessayer.",
+        });
+        return false;
+      }
     } finally {
       setIsSubmittingSale(false);
     }
@@ -687,6 +896,11 @@ function PosPage() {
       <SectionCard
         title="Caisse active"
         description="Le contexte de vente actuel est applique a chaque ticket."
+        actions={
+          <span className={`app-badge ${isOnline ? "tone-success" : "tone-warning"}`}>
+            {isOnline ? "En ligne" : "Hors ligne"}
+          </span>
+        }
       >
         <div className="register-context-grid">
           <div className="detail-stat">

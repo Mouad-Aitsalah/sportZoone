@@ -333,6 +333,66 @@ const getDateRange = (period) => {
   return null;
 };
 
+const getAnalyticsDateRange = (period) => {
+  const now = new Date();
+  const endDate = getEndOfDay(now);
+
+  if (period === "week") {
+    const startDate = getStartOfDay(new Date(now));
+    startDate.setDate(startDate.getDate() - 6);
+
+    return {
+      startDate,
+      endDate,
+    };
+  }
+
+  if (period === "month") {
+    return {
+      startDate: getStartOfMonth(now),
+      endDate,
+    };
+  }
+
+  return null;
+};
+
+const formatAnalyticsDateKey = (date) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+};
+
+const formatAnalyticsLabel = (date, period) => {
+  if (period === "week") {
+    return date.toLocaleDateString("fr-MA", {
+      weekday: "short",
+    });
+  }
+
+  return date.toLocaleDateString("fr-MA", {
+    day: "2-digit",
+    month: "2-digit",
+  });
+};
+
+const buildAnalyticsBuckets = (period, startDate, endDate) => {
+  const buckets = [];
+  const cursor = new Date(startDate);
+
+  while (cursor <= endDate) {
+    buckets.push({
+      key: formatAnalyticsDateKey(cursor),
+      label: formatAnalyticsLabel(cursor, period),
+    });
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  return buckets;
+};
+
 const getEmployeeStoreId = (user) => {
   if (user.role !== "EMPLOYE") {
     return null;
@@ -1149,7 +1209,11 @@ const createSale = async (req, res) => {
   }
 
   if (typeof req.body.paymentMethod !== "string" || isBlankString(req.body.paymentMethod)) {
-    throw createHttpError(400, "paymentMethod must be a non-empty string", "BAD_REQUEST");
+    throw createHttpError(
+      400,
+      "paymentMethod must be a non-empty string",
+      "BAD_REQUEST"
+    );
   }
 
   const paymentMethod = normalizePaymentMethod(req.body.paymentMethod);
@@ -1181,7 +1245,8 @@ const createSale = async (req, res) => {
     );
   }
 
-  const sale = await prisma.$transaction(async (tx) => {
+  try {
+    const sale = await prisma.$transaction(async (tx) => {
     const customer =
       requestedCustomerId !== null
         ? await tx.client.findUnique({
@@ -1432,32 +1497,50 @@ const createSale = async (req, res) => {
         client: true,
       },
     });
-  });
+    });
 
-  return res.status(201).json({
-    id: sale.id,
-    ticketNumber: sale.numeroTicket,
-    storeId: sale.pointDeVenteId,
-    cashRegisterId: sale.caisseId,
-    userId: sale.utilisateurId,
-    customerId: sale.clientId,
-    customerNumber: sale.client ? sale.client.numeroClient : null,
-    customerName: sale.client ? sale.client.nom : null,
-    customerCredit: sale.client ? decimalToNumber(sale.client.credit) : 0,
-    total: decimalToNumber(sale.total),
-    paymentMethod: sale.paymentMethod,
-    status: sale.status,
-    createdAt: sale.createdAt,
-  });
+    return res.status(201).json({
+      id: sale.id,
+      ticketNumber: sale.numeroTicket,
+      storeId: sale.pointDeVenteId,
+      cashRegisterId: sale.caisseId,
+      userId: sale.utilisateurId,
+      customerId: sale.clientId,
+      customerNumber: sale.client ? sale.client.numeroClient : null,
+      customerName: sale.client ? sale.client.nom : null,
+      customerCredit: sale.client ? decimalToNumber(sale.client.credit) : 0,
+      total: decimalToNumber(sale.total),
+      paymentMethod: sale.paymentMethod,
+      status: sale.status,
+      createdAt: sale.createdAt,
+    });
+  } catch (error) {
+    throw error;
+  }
 };
 
 const getSales = async (req, res) => {
-  const where =
-    req.user.role === "EMPLOYE"
+  const requestedPaymentMethod = normalizeOptionalString(req.query.paymentMethod);
+  const paymentMethodFilter = requestedPaymentMethod
+    ? normalizePaymentMethod(requestedPaymentMethod)
+    : null;
+
+  if (requestedPaymentMethod && !paymentMethodFilter) {
+    throw createHttpError(400, "paymentMethod must be one of: cash, card, credit.");
+  }
+
+  const where = {
+    ...(req.user.role === "EMPLOYE"
       ? {
           utilisateurId: req.user.id,
         }
-      : {};
+      : {}),
+    ...(paymentMethodFilter
+      ? {
+          paymentMethod: paymentMethodFilter,
+        }
+      : {}),
+  };
   const { page, limit, skip } = getPaginationParams(req.query);
   const [total, sales] = await Promise.all([
     prisma.vente.count({ where }),
@@ -1540,7 +1623,6 @@ const getSales = async (req, res) => {
             0
           ),
           total: decimalToNumber(sale.total),
-          syncStatus: "synced",
           returns: sale.retours.map((retour) => ({
             id: retour.id,
             produitId: retour.produitId,
@@ -2260,6 +2342,187 @@ const getReports = async (req, res) => {
   });
 };
 
+const getAnalytics = async (req, res) => {
+  const period = normalizeRequiredString(req.query.period || "week").toLowerCase();
+  const range = getAnalyticsDateRange(period);
+
+  if (!range) {
+    throw createHttpError(400, "period must be one of: week, month.");
+  }
+
+  const [stores, sales] = await Promise.all([
+    prisma.pointDeVente.findMany({
+      select: {
+        id: true,
+        nom: true,
+      },
+      orderBy: [{ nom: "asc" }, { id: "asc" }],
+    }),
+    prisma.vente.findMany({
+      where: {
+        status: "completed",
+        dateVente: {
+          gte: range.startDate,
+          lte: range.endDate,
+        },
+      },
+      include: {
+        pointDeVente: {
+          select: {
+            id: true,
+            nom: true,
+          },
+        },
+        lignes: {
+          include: {
+            produit: {
+              select: {
+                id: true,
+                nom: true,
+                categorie: true,
+              },
+            },
+          },
+        },
+      },
+      orderBy: {
+        dateVente: "asc",
+      },
+    }),
+  ]);
+
+  const hasSales = sales.length > 0;
+  const evolutionBuckets = buildAnalyticsBuckets(
+    period,
+    range.startDate,
+    range.endDate
+  );
+  const salesEvolutionMap = new Map(
+    evolutionBuckets.map((bucket) => [bucket.key, new Prisma.Decimal(0)])
+  );
+  const salesByStoreMap = new Map(
+    stores.map((store) => [
+      store.id,
+      {
+        store: store.nom,
+        ventes: new Prisma.Decimal(0),
+      },
+    ])
+  );
+  const topProductsMap = new Map();
+  const categoryDistributionMap = new Map();
+  let totalRevenue = new Prisma.Decimal(0);
+
+  for (const sale of sales) {
+    totalRevenue = totalRevenue.plus(sale.total);
+
+    const saleDateKey = formatAnalyticsDateKey(sale.dateVente);
+    const existingDailyRevenue =
+      salesEvolutionMap.get(saleDateKey) || new Prisma.Decimal(0);
+    salesEvolutionMap.set(saleDateKey, existingDailyRevenue.plus(sale.total));
+
+    if (sale.pointDeVente) {
+      const existingStore =
+        salesByStoreMap.get(sale.pointDeVente.id) || {
+          store: sale.pointDeVente.nom,
+          ventes: new Prisma.Decimal(0),
+        };
+
+      existingStore.ventes = existingStore.ventes.plus(sale.total);
+      salesByStoreMap.set(sale.pointDeVente.id, existingStore);
+    }
+
+    for (const ligne of sale.lignes) {
+      const productId = ligne.produit?.id || ligne.produitId;
+      const productName = ligne.produit?.nom || "Produit";
+      const productCategory = ligne.produit?.categorie || "Sans categorie";
+      const existingProduct = topProductsMap.get(productId) || {
+        name: productName,
+        quantite: 0,
+      };
+      const existingCategoryRevenue =
+        categoryDistributionMap.get(productCategory) || new Prisma.Decimal(0);
+
+      existingProduct.quantite += ligne.quantite;
+      topProductsMap.set(productId, existingProduct);
+      categoryDistributionMap.set(
+        productCategory,
+        existingCategoryRevenue.plus(ligne.sousTotal)
+      );
+    }
+  }
+
+  const salesEvolution = hasSales
+    ? evolutionBuckets.map((bucket) => ({
+        date: bucket.label,
+        ventes: decimalToNumber(salesEvolutionMap.get(bucket.key)),
+      }))
+    : [];
+
+  const salesByStore = hasSales
+    ? Array.from(salesByStoreMap.values())
+        .map((store) => ({
+          store: store.store,
+          ventes: decimalToNumber(store.ventes),
+        }))
+        .sort((left, right) => {
+          if (right.ventes !== left.ventes) {
+            return right.ventes - left.ventes;
+          }
+
+          return left.store.localeCompare(right.store);
+        })
+    : [];
+
+  const topProducts = hasSales
+    ? Array.from(topProductsMap.values())
+        .sort((left, right) => right.quantite - left.quantite)
+        .slice(0, 10)
+    : [];
+
+  const salesDistribution = hasSales
+    ? Array.from(categoryDistributionMap.entries())
+        .map(([name, revenue]) => ({
+          name,
+          revenue: decimalToNumber(revenue),
+          value:
+            totalRevenue.gt(0)
+              ? Number(
+                  revenue
+                    .div(totalRevenue)
+                    .times(100)
+                    .toDecimalPlaces(2)
+                    .toString()
+                )
+              : 0,
+        }))
+        .sort((left, right) => right.revenue - left.revenue)
+    : [];
+
+  const bestStore = salesByStore[0] || null;
+
+  return res.status(200).json({
+    period,
+    hasSales,
+    revenue: decimalToNumber(totalRevenue),
+    salesCount: sales.length,
+    averageBasket:
+      sales.length > 0 ? decimalToNumber(totalRevenue.div(sales.length)) : 0,
+    bestStore: bestStore
+      ? {
+          name: bestStore.store,
+          revenue: bestStore.ventes,
+        }
+      : null,
+    topProduct: topProducts[0] || null,
+    categoriesTracked: salesDistribution.length,
+    salesEvolution,
+    salesByStore,
+    topProducts,
+    salesDistribution,
+  });
+};
+
 const getUsers = async (req, res) => {
   const users = await prisma.utilisateur.findMany({
     include: {
@@ -2442,6 +2705,7 @@ module.exports = {
   getCustomerCredit,
   getSuppliers,
   getReports,
+  getAnalytics,
   getAutoReportStatus,
   toggleAutoReportStatus,
   getUsers,

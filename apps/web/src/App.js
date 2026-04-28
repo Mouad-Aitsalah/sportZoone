@@ -24,18 +24,18 @@ function App() {
 
           <Route element={<RequireAuth />}>
             <Route element={<MainLayout />}>
-            <Route path={ROUTE_PATHS.DASHBOARD} element={<DashboardPage />} />
-            <Route path={ROUTE_PATHS.POS} element={<PosPage />} />
-            <Route path={ROUTE_PATHS.PRODUCTS} element={<ProductsPage />} />
-            <Route path={ROUTE_PATHS.STOCK} element={<StockPage />} />
-            <Route path={ROUTE_PATHS.SUPPLIERS} element={<SuppliersPage />} />
-            <Route path={ROUTE_PATHS.SALES} element={<SalesHistoryPage />} />
-            <Route path={ROUTE_PATHS.REPORTS} element={<ReportsPage />} />
-            <Route path={ROUTE_PATHS.USERS} element={<UsersPage />} />
-            <Route path={ROUTE_PATHS.STORES} element={<StoresPage />} />
-            <Route path={ROUTE_PATHS.CUSTOMERS} element={<CustomersPage />} />
+              <Route path={ROUTE_PATHS.DASHBOARD} element={<DashboardPage />} />
+              <Route path={ROUTE_PATHS.POS} element={<PosPage />} />
+              <Route path={ROUTE_PATHS.PRODUCTS} element={<ProductsPage />} />
+              <Route path={ROUTE_PATHS.STOCK} element={<StockPage />} />
+              <Route path={ROUTE_PATHS.SUPPLIERS} element={<SuppliersPage />} />
+              <Route path={ROUTE_PATHS.SALES} element={<SalesHistoryPage />} />
+              <Route path={ROUTE_PATHS.REPORTS} element={<ReportsPage />} />
+              <Route path={ROUTE_PATHS.USERS} element={<UsersPage />} />
+              <Route path={ROUTE_PATHS.STORES} element={<StoresPage />} />
+              <Route path={ROUTE_PATHS.CUSTOMERS} element={<CustomersPage />} />
+            </Route>
           </Route>
-        </Route>
 
           <Route
             path="*"

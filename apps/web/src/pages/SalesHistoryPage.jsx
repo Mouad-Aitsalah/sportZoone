@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import api from "../services/api";
 import Badge from "../components/Badge";
 import DataTable from "../components/DataTable";
@@ -6,6 +6,12 @@ import Modal from "../components/Modal";
 import PageHeader from "../components/PageHeader";
 import SearchInput from "../components/SearchInput";
 import SectionCard from "../components/SectionCard";
+import {
+  getOfflineSales,
+  markSaleAsFailed,
+  markSaleAsSynced,
+  updateSaleStatus,
+} from "../services/offlineDb";
 import { getCurrentUser } from "../store/authStore";
 import { downloadBlob } from "../utils/downloadBlob";
 import {
@@ -73,10 +79,110 @@ const getSaleStatusMeta = (status, paymentMethod) => {
   };
 };
 
+const getPaymentMethodMeta = (paymentMethod) => {
+  if (paymentMethod === "credit") {
+    return {
+      label: "Credit",
+      tone: "warning",
+    };
+  }
+
+  if (paymentMethod === "card") {
+    return {
+      label: "Carte",
+      tone: "info",
+    };
+  }
+
+  return {
+    label: "Especes",
+    tone: "success",
+  };
+};
+
+const getSyncStatusMeta = (syncStatus, localOnly = false) => {
+  if (syncStatus === "pending") {
+    return {
+      label: "En attente",
+      tone: "warning",
+    };
+  }
+
+  if (syncStatus === "failed") {
+    return {
+      label: "Erreur",
+      tone: "danger",
+    };
+  }
+
+  if (syncStatus === "syncing") {
+    return {
+      label: "Synchronisation...",
+      tone: "info",
+    };
+  }
+
+  if (syncStatus === "synced") {
+    return {
+      label: "Synchronise",
+      tone: "success",
+    };
+  }
+
+  return {
+    label: localOnly ? "En attente" : "En ligne",
+    tone: "success",
+  };
+};
+
+const mapOfflineSaleToHistorySale = (sale) => ({
+  id: `local-${sale.localId}`,
+  localId: sale.localId,
+  ticketNumber: `LOCAL-${String(sale.localId || "")
+    .replace(/[^a-zA-Z0-9]/g, "")
+    .slice(0, 8)
+    .toUpperCase()}`,
+  date: sale.createdAt,
+  createdAt: sale.createdAt,
+  storeId: sale.storeId || null,
+  storeName: sale.storeName || (sale.storeId ? `Magasin ${sale.storeId}` : "-"),
+  cashRegisterId: sale.caisseId || sale.cashRegisterId || null,
+  cashRegisterName:
+    sale.caisseName ||
+    sale.cashRegisterName ||
+    (sale.caisseId || sale.cashRegisterId
+      ? `Caisse ${sale.caisseId || sale.cashRegisterId}`
+      : "-"),
+  userId: sale.userId || null,
+  cashierName: sale.cashierName || (sale.userId ? `Utilisateur ${sale.userId}` : "-"),
+  customerId: sale.clientId || null,
+  customerNumber: sale.customerNumber || null,
+  customerName: sale.clientName || sale.customerName || "Client inconnu",
+  customerCredit: sale.customerCredit || 0,
+  paymentMethod: sale.paymentMethod,
+  status: "pending_sync",
+  syncStatus: sale.syncStatus || "pending",
+  syncError: sale.syncError || null,
+  total: sale.total || 0,
+  itemsCount: Array.isArray(sale.items) ? sale.items.length : 0,
+  localOnly: true,
+  items: (sale.items || []).map((item) => ({
+    productId: item.productId,
+    productName: item.productName || item.name || `Produit #${item.productId || "-"}`,
+    quantity: item.quantity || 0,
+    returnedQuantity: 0,
+    remainingReturnQuantity: 0,
+    unitPrice: item.unitPrice || 0,
+    subtotal:
+      item.subtotal || (item.quantity || 0) * (item.unitPrice || 0),
+  })),
+});
+
 function SalesHistoryPage() {
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedStore, setSelectedStore] = useState("Tous");
   const [selectedDate, setSelectedDate] = useState("");
+  const [selectedPaymentMethod, setSelectedPaymentMethod] = useState("all");
   const [selectedSale, setSelectedSale] = useState(null);
   const [saleToCancel, setSaleToCancel] = useState(null);
   const [saleToReturn, setSaleToReturn] = useState(null);
@@ -85,7 +191,8 @@ function SalesHistoryPage() {
   const [returnReason, setReturnReason] = useState("");
   const [creditPaymentAmount, setCreditPaymentAmount] = useState("");
   const [creditPaymentNote, setCreditPaymentNote] = useState("");
-  const [sales, setSales] = useState([]);
+  const [backendSales, setBackendSales] = useState([]);
+  const [offlineSales, setOfflineSalesState] = useState([]);
   const [stores, setStores] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isExportingExcel, setIsExportingExcel] = useState(false);
@@ -93,6 +200,7 @@ function SalesHistoryPage() {
   const [isSubmittingCancel, setIsSubmittingCancel] = useState(false);
   const [isSubmittingReturn, setIsSubmittingReturn] = useState(false);
   const [isSubmittingCreditPayment, setIsSubmittingCreditPayment] = useState(false);
+  const [isSynchronizingOfflineSales, setIsSynchronizingOfflineSales] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [notice, setNotice] = useState({ type: "", message: "" });
   const [cancelModalError, setCancelModalError] = useState("");
@@ -101,15 +209,49 @@ function SalesHistoryPage() {
   const currentUser = getCurrentUser();
   const isAdmin = currentUser?.role === "admin";
 
-  const fetchPageData = async () => {
-    const [salesResponse, storesResponse] = await Promise.all([
-      api.get("/sales"),
+  const loadOfflineSalesState = useCallback(async () => {
+    const localSales = await getOfflineSales();
+    setOfflineSalesState(localSales.map(mapOfflineSaleToHistorySale));
+    return localSales;
+  }, []);
+
+  const fetchPageData = useCallback(async () => {
+    const [salesResult, storesResult, offlineSalesResult] = await Promise.allSettled([
+      api.get("/sales", {
+        params: {
+          paymentMethod:
+            selectedPaymentMethod === "all" ? undefined : selectedPaymentMethod,
+        },
+      }),
       api.get("/stores"),
+      getOfflineSales(),
     ]);
 
-    setSales(getSalesCollection(salesResponse.data));
-    setStores(getStoresCollection(storesResponse.data));
-  };
+    if (offlineSalesResult.status === "fulfilled") {
+      setOfflineSalesState(offlineSalesResult.value.map(mapOfflineSaleToHistorySale));
+    } else {
+      setOfflineSalesState([]);
+    }
+
+    if (salesResult.status === "fulfilled") {
+      setBackendSales(getSalesCollection(salesResult.value.data));
+    } else {
+      setBackendSales([]);
+    }
+
+    if (storesResult.status === "fulfilled") {
+      setStores(getStoresCollection(storesResult.value.data));
+    } else {
+      setStores([]);
+    }
+
+    const hasOfflineSales =
+      offlineSalesResult.status === "fulfilled" && offlineSalesResult.value.length > 0;
+
+    if (salesResult.status === "rejected" && !hasOfflineSales) {
+      throw salesResult.reason;
+    }
+  }, [selectedPaymentMethod]);
 
   useEffect(() => {
     let isMounted = true;
@@ -119,15 +261,7 @@ function SalesHistoryPage() {
         setIsLoading(true);
         setErrorMessage("");
 
-        const [salesResponse, storesResponse] = await Promise.all([
-          api.get("/sales"),
-          api.get("/stores"),
-        ]);
-
-        if (isMounted) {
-          setSales(getSalesCollection(salesResponse.data));
-          setStores(getStoresCollection(storesResponse.data));
-        }
+        await fetchPageData();
       } catch (error) {
         if (isMounted) {
           setErrorMessage(
@@ -147,7 +281,48 @@ function SalesHistoryPage() {
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [fetchPageData]);
+
+  const sales = useMemo(
+    () =>
+      [...offlineSales, ...backendSales].sort(
+        (left, right) =>
+          new Date(right.date || right.createdAt || 0).getTime() -
+          new Date(left.date || left.createdAt || 0).getTime()
+      ),
+    [backendSales, offlineSales]
+  );
+
+  const storeOptions = useMemo(() => {
+    const storeMap = new Map();
+
+    for (const store of stores) {
+      if (store?.name) {
+        storeMap.set(store.name, store);
+      }
+    }
+
+    for (const sale of offlineSales) {
+      const storeName = sale.storeName || sale.storeId;
+
+      if (storeName && !storeMap.has(storeName)) {
+        storeMap.set(storeName, {
+          id: sale.storeId || storeName,
+          name: storeName,
+        });
+      }
+    }
+
+    return Array.from(storeMap.values());
+  }, [offlineSales, stores]);
+
+  const hasSyncableOfflineSales = useMemo(
+    () =>
+      offlineSales.some(
+        (sale) => sale.localOnly && ["pending", "failed"].includes(sale.syncStatus)
+      ),
+    [offlineSales]
+  );
 
   const filteredSales = useMemo(
     () =>
@@ -172,10 +347,18 @@ function SalesHistoryPage() {
         const matchesStore =
           selectedStore === "Tous" || storeName === selectedStore;
         const matchesDate = !selectedDate || saleDate.startsWith(selectedDate);
+        const matchesPaymentMethod =
+          selectedPaymentMethod === "all" ||
+          sale.paymentMethod === selectedPaymentMethod;
 
-        return matchesSearch && matchesStore && matchesDate;
+        return (
+          matchesSearch &&
+          matchesStore &&
+          matchesDate &&
+          matchesPaymentMethod
+        );
       }),
-    [sales, searchTerm, selectedStore, selectedDate]
+    [sales, searchTerm, selectedStore, selectedDate, selectedPaymentMethod]
   );
 
   const handlePrintTicket = (sale) => {
@@ -380,6 +563,8 @@ function SalesHistoryPage() {
       startDate: selectedDate || undefined,
       endDate: selectedDate || undefined,
       storeId: selectedStoreMatch?.id || undefined,
+      paymentMethod:
+        selectedPaymentMethod === "all" ? undefined : selectedPaymentMethod,
     };
 
     try {
@@ -416,13 +601,89 @@ function SalesHistoryPage() {
     }
   };
 
-  const canCancelSale = (sale) => isAdmin && sale?.status === "completed";
+  const handleSyncOfflineSales = async () => {
+    try {
+      setIsSynchronizingOfflineSales(true);
+      setErrorMessage("");
+      setNotice({ type: "", message: "" });
+
+      const localSales = await getOfflineSales();
+      const syncableSales = localSales.filter((sale) =>
+        ["pending", "failed"].includes(sale.syncStatus)
+      );
+
+      if (!syncableSales.length) {
+        setNotice({
+          type: "info",
+          message: "Aucune vente offline a synchroniser.",
+        });
+        return;
+      }
+
+      for (const sale of syncableSales) {
+        await updateSaleStatus(sale.localId, "syncing", null);
+        await loadOfflineSalesState();
+
+        const hasKnownCustomer = Number(sale.clientId || 0) > 0;
+        const payload = {
+          storeId: sale.storeId,
+          caisseId: sale.caisseId || sale.cashRegisterId,
+          paymentMethod: sale.paymentMethod,
+          total: sale.total,
+          items: (sale.items || []).map((item) => ({
+            productId: item.productId,
+            quantity: item.quantity,
+            unitPrice: item.unitPrice,
+          })),
+          ...(hasKnownCustomer
+            ? {
+                clientId: sale.clientId,
+              }
+            : {}),
+        };
+
+        try {
+          await api.post("/sales", payload);
+          await markSaleAsSynced(sale.localId);
+        } catch (error) {
+          const syncErrorMessage =
+            error.response?.data?.message ||
+            error.response?.data?.error ||
+            error.message ||
+            "Erreur de synchronisation";
+          await markSaleAsFailed(sale.localId, syncErrorMessage);
+        }
+
+        await loadOfflineSalesState();
+      }
+
+      await fetchPageData();
+      setNotice({
+        type: "success",
+        message: "Synchronisation des ventes offline terminee.",
+      });
+    } catch (error) {
+      setNotice({
+        type: "error",
+        message:
+          error.message ||
+          "Impossible de synchroniser les ventes offline pour le moment.",
+      });
+    } finally {
+      setIsSynchronizingOfflineSales(false);
+    }
+  };
+
+  const canCancelSale = (sale) =>
+    !sale?.localOnly && isAdmin && sale?.status === "completed";
 
   const canReturnSale = (sale) =>
+    !sale?.localOnly &&
     sale?.status !== "cancelled" &&
     sale?.items?.some((item) => (item.remainingReturnQuantity ?? item.quantity ?? 0) > 0);
 
   const canPayCreditSale = (sale) =>
+    !sale?.localOnly &&
     sale?.paymentMethod === "credit" &&
     Number(sale?.customerCredit || 0) > 0 &&
     Number(sale?.customerId || 0) > 0;
@@ -668,6 +929,20 @@ function SalesHistoryPage() {
       <SectionCard
         title="Tickets de vente"
         description="Rechercher par numero de ticket ou caissier."
+        actions={
+          hasSyncableOfflineSales ? (
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={handleSyncOfflineSales}
+              disabled={isSynchronizingOfflineSales}
+            >
+              {isSynchronizingOfflineSales
+                ? "Synchronisation..."
+                : "Synchroniser les ventes offline"}
+            </button>
+          ) : null
+        }
       >
         <div className="filter-row">
           <SearchInput
@@ -689,11 +964,22 @@ function SalesHistoryPage() {
             onChange={(event) => setSelectedStore(event.target.value)}
           >
             <option value="Tous">Tous les magasins</option>
-            {stores.map((store) => (
+            {storeOptions.map((store) => (
               <option key={store.id} value={store.name}>
                 {store.name}
               </option>
             ))}
+          </select>
+
+          <select
+            className="text-input select-input"
+            value={selectedPaymentMethod}
+            onChange={(event) => setSelectedPaymentMethod(event.target.value)}
+          >
+            <option value="all">Tous les paiements</option>
+            <option value="cash">Especes</option>
+            <option value="card">Carte bancaire</option>
+            <option value="credit">Credit</option>
           </select>
 
           <button
@@ -715,7 +1001,7 @@ function SalesHistoryPage() {
           </button>
         </div>
 
-        {errorMessage ? (
+            {errorMessage ? (
           <div className="inline-notice error">{errorMessage}</div>
         ) : null}
 
@@ -729,11 +1015,15 @@ function SalesHistoryPage() {
             { key: "customer", label: "Client" },
             { key: "items", label: "Nb articles" },
             { key: "total", label: "Total" },
+            { key: "payment", label: "Paiement" },
+            { key: "sync", label: "Sync" },
             { key: "status", label: "Statut" },
             { key: "actions", label: "Actions" },
           ]}
           data={filteredSales}
-          emptyTitle={isLoading ? "Chargement..." : "Aucune vente trouvee"}
+          emptyTitle={
+            isLoading ? "Chargement..." : "Aucune vente trouvee pour ce filtre"
+          }
           emptyDescription={
             isLoading
               ? "Recuperation des ventes en cours."
@@ -752,10 +1042,14 @@ function SalesHistoryPage() {
             const saleDate = sale.date || sale.createdAt;
             const items = sale.items || [];
             const itemsCount = sale.itemsCount || items.length || 0;
-            const statusMeta = getSaleStatusMeta(
-              sale.status,
-              sale.paymentMethod
-            );
+            const paymentMeta = getPaymentMethodMeta(sale.paymentMethod);
+            const syncMeta = getSyncStatusMeta(sale.syncStatus, sale.localOnly);
+            const statusMeta = sale.localOnly
+              ? {
+                  label: "En attente sync",
+                  tone: "warning",
+                }
+              : getSaleStatusMeta(sale.status, sale.paymentMethod);
 
             return (
               <tr key={`${ticket}-${index}`}>
@@ -769,6 +1063,17 @@ function SalesHistoryPage() {
                 <td>{customerLabel}</td>
                 <td>{itemsCount}</td>
                 <td>{formatCurrencyDh(sale.total || 0)}</td>
+                <td>
+                  <Badge tone={paymentMeta.tone}>{paymentMeta.label}</Badge>
+                </td>
+                <td>
+                  <div className="table-cell-stack">
+                    <Badge tone={syncMeta.tone}>{syncMeta.label}</Badge>
+                    {sale.syncStatus === "failed" && sale.syncError ? (
+                      <span className="muted-text">{sale.syncError}</span>
+                    ) : null}
+                  </div>
+                </td>
                 <td>
                   <Badge tone={statusMeta.tone}>{statusMeta.label}</Badge>
                 </td>
@@ -918,8 +1223,35 @@ function SalesHistoryPage() {
                 </strong>
               </div>
               <div className="detail-stat">
+                <span>Paiement</span>
+                <strong>
+                  {
+                    getPaymentMethodMeta(selectedSale.paymentMethod).label
+                  }
+                </strong>
+              </div>
+              <div className="detail-stat">
+                <span>Sync</span>
+                <strong>
+                  {getSyncStatusMeta(
+                    selectedSale.syncStatus,
+                    selectedSale.localOnly
+                  ).label}
+                </strong>
+              </div>
+              {selectedSale.syncStatus === "failed" && selectedSale.syncError ? (
+                <div className="detail-stat">
+                  <span>Erreur sync</span>
+                  <strong>{selectedSale.syncError}</strong>
+                </div>
+              ) : null}
+              <div className="detail-stat">
                 <span>Numero client</span>
-                <strong>#{selectedSale.customerNumber || 1}</strong>
+                <strong>
+                  {selectedSale.customerNumber
+                    ? `#${selectedSale.customerNumber}`
+                    : "#1"}
+                </strong>
               </div>
               <div className="detail-stat">
                 <span>Nom client</span>
@@ -932,12 +1264,12 @@ function SalesHistoryPage() {
               <div className="detail-stat">
                 <span>Statut</span>
                 <strong>
-                  {
-                    getSaleStatusMeta(
-                      selectedSale.status,
-                      selectedSale.paymentMethod
-                    ).label
-                  }
+                  {selectedSale.localOnly
+                    ? "En attente sync"
+                    : getSaleStatusMeta(
+                        selectedSale.status,
+                        selectedSale.paymentMethod
+                      ).label}
                 </strong>
               </div>
             </div>

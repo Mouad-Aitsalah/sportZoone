@@ -22,8 +22,18 @@ function PaymentModal({
     return null;
   }
 
-  const handleConfirm = () => {
-    onConfirm(paymentMethod);
+  const submitPayment = async () => onConfirm(paymentMethod);
+
+  const handleConfirm = async () => {
+    await submitPayment();
+  };
+
+  const handlePrintAndConfirm = async () => {
+    const confirmed = await submitPayment();
+
+    if (confirmed) {
+      window.print();
+    }
   };
 
   const handleClose = () => {
@@ -47,6 +57,14 @@ function PaymentModal({
             disabled={isProcessing}
           >
             Annuler
+          </button>
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={handlePrintAndConfirm}
+            disabled={isProcessing}
+          >
+            {isProcessing ? "Confirmation..." : "Imprimer"}
           </button>
           <button
             className="primary-button"

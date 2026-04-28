@@ -4,20 +4,24 @@ import Badge from "../components/Badge";
 import DataTable from "../components/DataTable";
 import Modal from "../components/Modal";
 import PageHeader from "../components/PageHeader";
+import SalesLineChart from "../components/charts/SalesLineChart";
+import SalesPieChart from "../components/charts/SalesPieChart";
+import StoreBarChart from "../components/charts/StoreBarChart";
+import TopProductsChart from "../components/charts/TopProductsChart";
 import SectionCard from "../components/SectionCard";
 import StatCard from "../components/StatCard";
-import TopSellingList from "../components/TopSellingList";
 import { formatCurrencyDh } from "../utils/formatters";
 
 const periodOptions = [
-  { key: "day", label: "Jour" },
-  { key: "week", label: "Semaine" },
-  { key: "month", label: "Mois" },
+  { key: "week", label: "7 derniers jours" },
+  { key: "month", label: "Mensuel" },
 ];
 
+const emptySalesMessage = "Pas encore de donnees de vente pour cette periode.";
+
 function DashboardPage() {
-  const [period, setPeriod] = useState("day");
-  const [report, setReport] = useState(null);
+  const [period, setPeriod] = useState("week");
+  const [analytics, setAnalytics] = useState(null);
   const [alerts, setAlerts] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isAlertsModalOpen, setIsAlertsModalOpen] = useState(false);
@@ -31,19 +35,21 @@ function DashboardPage() {
         setIsLoading(true);
         setErrorMessage("");
 
-        const [reportResponse, alertsResponse] = await Promise.all([
-          api.get("/reports", {
+        const [analyticsResponse, alertsResponse] = await Promise.all([
+          api.get("/analytics", {
             params: { period },
           }),
           api.get("/stocks/alerts"),
         ]);
 
         if (isMounted) {
-          setReport(reportResponse.data);
+          setAnalytics(analyticsResponse.data || null);
           setAlerts(Array.isArray(alertsResponse.data) ? alertsResponse.data : []);
         }
       } catch (error) {
         if (isMounted) {
+          setAnalytics(null);
+          setAlerts([]);
           setErrorMessage(
             error.response?.data?.message ||
               "Impossible de charger les donnees du dashboard."
@@ -63,8 +69,11 @@ function DashboardPage() {
     };
   }, [period]);
 
+  const hasSales = Boolean(analytics?.hasSales);
   const lowStockCount = alerts.length;
-  const criticalStockCount = alerts.filter((alert) => alert.severity === "critical").length;
+  const criticalStockCount = alerts.filter(
+    (alert) => alert.severity === "critical"
+  ).length;
   const warningStockCount = lowStockCount - criticalStockCount;
 
   const stats = useMemo(
@@ -73,62 +82,47 @@ function DashboardPage() {
         label: "Revenu",
         value: isLoading
           ? "Chargement..."
-          : formatCurrencyDh(report?.revenue || 0),
-        detail: "Chiffre d'affaires de la periode selectionnee.",
+          : formatCurrencyDh(analytics?.revenue || 0),
+        detail:
+          period === "week"
+            ? "Cumule sur les 7 derniers jours."
+            : "Cumule sur le mois en cours.",
         tone: "success",
       },
       {
         label: "Nombre de ventes",
-        value: isLoading ? "Chargement..." : report?.salesCount || 0,
-        detail: "Transactions enregistrees sur la periode.",
+        value: isLoading ? "Chargement..." : analytics?.salesCount || 0,
+        detail: "Transactions validees sur la periode selectionnee.",
         tone: "info",
       },
       {
         label: "Panier moyen",
         value: isLoading
           ? "Chargement..."
-          : formatCurrencyDh(report?.averageBasket || 0),
-        detail: "Montant moyen par ticket.",
+          : formatCurrencyDh(analytics?.averageBasket || 0),
+        detail: "Montant moyen par ticket valide.",
         tone: "default",
       },
       {
         label: "Meilleur magasin",
-        value: isLoading ? "Chargement..." : report?.bestStore || "-",
-        detail: "Point de vente le plus performant.",
+        value: isLoading
+          ? "Chargement..."
+          : analytics?.bestStore?.name || "Aucune donnee",
+        detail: analytics?.bestStore
+          ? `${formatCurrencyDh(analytics.bestStore.revenue || 0)} sur la periode.`
+          : "Aucune vente valide enregistree pour cette periode.",
         tone: "warning",
       },
-      {
-        label: "Alertes Stock",
-        value: isLoading ? "Chargement..." : lowStockCount,
-        detail:
-          isLoading
-            ? "Analyse des seuils en cours."
-            : `${lowStockCount} produits en stock faible`,
-        tone: criticalStockCount > 0 ? "danger" : "warning",
-      },
     ],
-    [criticalStockCount, isLoading, lowStockCount, report]
+    [analytics, isLoading, period]
   );
-
-  const topProducts = useMemo(
-    () =>
-      (report?.topProducts || []).map((product) => ({
-        name: product.name || product.productName || "Produit",
-        unitsSold: product.quantitySold || product.quantity || product.unitsSold || 0,
-        store: product.store || report?.bestStore || "Reseau",
-        revenue: product.revenue || 0,
-      })),
-    [report]
-  );
-
-  const salesByStore = report?.salesByStore || [];
 
   return (
     <div>
       <PageHeader
         eyebrow="Overview"
         title="Dashboard"
-        description="Suivre la performance commerciale et les indicateurs cles du reseau en temps reel."
+        description="Suivre la performance commerciale, les tendances de ventes et les alertes stock du reseau en temps reel."
         actions={
           <>
             <div className="period-selector">
@@ -154,11 +148,13 @@ function DashboardPage() {
         }
       />
 
-      {errorMessage ? (
-        <div className="inline-notice error">{errorMessage}</div>
+      {errorMessage ? <div className="inline-notice error">{errorMessage}</div> : null}
+
+      {!isLoading && !errorMessage && !hasSales ? (
+        <div className="inline-notice info">{emptySalesMessage}</div>
       ) : null}
 
-      <div className="card-grid">
+      <div className="card-grid analytics-stat-grid">
         {stats.map((item) => (
           <StatCard
             key={item.label}
@@ -170,121 +166,111 @@ function DashboardPage() {
         ))}
       </div>
 
-      <div className="dashboard-grid">
+      <SectionCard
+        title="Evolution des ventes"
+        description="Lecture rapide du revenu jour apres jour sur la periode selectionnee."
+        className="analytics-card dashboard-hero-chart"
+      >
+        <SalesLineChart
+          data={analytics?.salesEvolution || []}
+          loading={isLoading}
+          emptyTitle="Aucune evolution disponible"
+          emptyDescription={emptySalesMessage}
+        />
+      </SectionCard>
+
+      <div className="analytics-grid">
         <SectionCard
-          title="Top produits"
-          description="Meilleures references sur la periode selectionnee."
+          title="Comparaison entre magasins"
+          description="Comparer les ventes des points de vente reels suivis par l'application."
+          className="analytics-card"
         >
-          {isLoading ? (
-            <div className="empty-state">Chargement des top produits...</div>
-          ) : (
-            <TopSellingList products={topProducts} />
-          )}
+          <StoreBarChart
+            data={analytics?.salesByStore || []}
+            loading={isLoading}
+            emptyTitle="Aucune comparaison disponible"
+            emptyDescription={emptySalesMessage}
+          />
         </SectionCard>
 
         <SectionCard
-          title="Ventes par magasin"
-          description="Comparaison du chiffre d'affaires et du volume des ventes."
+          title="Repartition par categorie"
+          description="Poids des categories reelles dans le chiffre d'affaires."
+          className="analytics-card"
         >
-          <DataTable
-            columns={[
-              { key: "store", label: "Magasin" },
-              { key: "salesCount", label: "Nb ventes" },
-              { key: "revenue", label: "Revenu" },
-            ]}
-            data={salesByStore}
-            emptyTitle={isLoading ? "Chargement..." : "Aucune donnee disponible"}
-            emptyDescription={
-              isLoading
-                ? "Recuperation du rapport en cours."
-                : "Aucune synthese magasin disponible."
-            }
-            renderRow={(item, index) => (
-              <tr key={`${item.store || item.storeName || "store"}-${index}`}>
-                <td>{item.store || item.storeName || "-"}</td>
-                <td>{item.salesCount || item.count || 0}</td>
-                <td>{formatCurrencyDh(item.revenue || 0)}</td>
-              </tr>
-            )}
+          <SalesPieChart
+            data={analytics?.salesDistribution || []}
+            loading={isLoading}
+            emptyTitle="Aucune categorie vendue"
+            emptyDescription={emptySalesMessage}
           />
         </SectionCard>
       </div>
 
-      <div className="dashboard-grid dashboard-secondary-grid">
-        <SectionCard
-          title="Vue operationnelle"
-          description="Resume rapide de la periode active."
-        >
-          <div className="alert-list">
-            <div className="alert-item">
-              <div>
-                <strong>Periode active</strong>
-                <span>Analyse actuellement affichee sur {period}.</span>
-              </div>
-              <Badge tone="info">{period}</Badge>
-            </div>
+      <SectionCard
+        title="Top produits"
+        description="Produits reels les plus vendus en quantite sur la periode selectionnee."
+        className="analytics-card"
+      >
+        <TopProductsChart
+          data={analytics?.topProducts || []}
+          loading={isLoading}
+          limit={5}
+          emptyTitle="Aucun produit vendu"
+          emptyDescription={emptySalesMessage}
+        />
+      </SectionCard>
 
-            <div className="alert-item">
-              <div>
-                <strong>Magasin leader</strong>
-                <span>{report?.bestStore || "En attente de donnees"}</span>
-              </div>
-              <Badge tone="success">
-                {isLoading ? "..." : formatCurrencyDh(report?.revenue || 0)}
-              </Badge>
-            </div>
-
-            <div className="alert-item">
-              <div>
-                <strong>Panier moyen</strong>
-                <span>Valeur moyenne observee sur la periode.</span>
-              </div>
-              <Badge tone="neutral">
-                {isLoading ? "..." : formatCurrencyDh(report?.averageBasket || 0)}
-              </Badge>
-            </div>
+      <SectionCard
+        title="Alertes stock"
+        description="Produits en rupture ou sous seuil minimum dans le reseau."
+        actions={
+          <button
+            className="ghost-button"
+            type="button"
+            onClick={() => setIsAlertsModalOpen(true)}
+          >
+            Voir alertes
+          </button>
+        }
+      >
+        <div className="stock-alert-summary">
+          <div className="stock-alert-summary-card critical">
+            <span>Produits en rupture</span>
+            <strong>{isLoading ? "..." : criticalStockCount}</strong>
           </div>
-        </SectionCard>
-
-        <SectionCard
-          title="Synthese ventes"
-          description="Volume global remonte par l'API de reporting."
-        >
-          <div className="alert-list">
-            <div className="alert-item">
-              <div>
-                <strong>Transactions</strong>
-                <span>Nombre total de ventes sur la periode.</span>
-              </div>
-              <Badge tone="info">
-                {isLoading ? "..." : report?.salesCount || 0}
-              </Badge>
-            </div>
-
-            <div className="alert-item">
-              <div>
-                <strong>Top produit</strong>
-                <span>
-                  {topProducts[0]?.name || "Aucun produit disponible pour le moment."}
-                </span>
-              </div>
-              <Badge tone="warning">
-                {isLoading ? "..." : topProducts[0]?.unitsSold || 0}
-              </Badge>
-            </div>
-
-            <div className="alert-item">
-              <div>
-                <strong>Stock critique</strong>
-                <span>Produits a zero necessitant un reapprovisionnement.</span>
-              </div>
-              <Badge tone={criticalStockCount > 0 ? "stock-critical" : "neutral"}>
-                {isLoading ? "..." : criticalStockCount}
-              </Badge>
-            </div>
+          <div className="stock-alert-summary-card warning">
+            <span>Produits en stock faible</span>
+            <strong>{isLoading ? "..." : warningStockCount}</strong>
           </div>
-        </SectionCard>
-      </div>
+        </div>
+
+        <div className="dashboard-alert-list">
+          <div className="alert-item">
+            <div>
+              <strong>Alertes actives</strong>
+              <span>
+                {isLoading
+                  ? "Analyse des seuils en cours."
+                  : `${lowStockCount} produits necessitent une attention.`}
+              </span>
+            </div>
+            <Badge tone={criticalStockCount > 0 ? "stock-critical" : "stock-warning"}>
+              {isLoading ? "..." : lowStockCount}
+            </Badge>
+          </div>
+
+          <div className="alert-item">
+            <div>
+              <strong>Ruptures critiques</strong>
+              <span>Produits a zero a reapprovisionner en priorite.</span>
+            </div>
+            <Badge tone={criticalStockCount > 0 ? "stock-critical" : "neutral"}>
+              {isLoading ? "..." : criticalStockCount}
+            </Badge>
+          </div>
+        </div>
+      </SectionCard>
 
       <Modal
         isOpen={isAlertsModalOpen}

@@ -536,6 +536,63 @@ a {
   grid-template-columns: 0.85fr 1.15fr;
 }
 
+.analytics-stat-grid {
+  margin-bottom: 22px;
+}
+
+.analytics-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  margin-bottom: 18px;
+}
+
+.analytics-card {
+  min-height: 440px;
+  margin-bottom: 18px;
+}
+
+.dashboard-hero-chart {
+  min-height: 420px;
+}
+
+.dashboard-alert-list {
+  display: grid;
+  gap: 14px;
+  margin-top: 20px;
+}
+
+.chart-shell {
+  width: 100%;
+  min-height: 320px;
+}
+
+.chart-loading {
+  display: grid;
+  place-items: center;
+  min-height: 320px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 18px;
+  color: var(--text-soft);
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.9), rgba(244, 247, 251, 0.95));
+}
+
+.recharts-default-tooltip {
+  border-radius: 16px !important;
+  border: 1px solid var(--border) !important;
+  box-shadow: 0 18px 36px rgba(18, 33, 53, 0.12) !important;
+}
+
+.recharts-tooltip-label {
+  color: var(--text) !important;
+  font-weight: 700 !important;
+}
+
+.recharts-legend-item-text {
+  color: var(--text-soft) !important;
+}
+
 .section-card-header {
   margin-bottom: 18px;
 }
@@ -1376,6 +1433,7 @@ a {
 
 @media (max-width: 1280px) {
   .card-grid,
+  .analytics-grid,
   .dashboard-grid,
   .dashboard-secondary-grid,
   .pos-layout,
