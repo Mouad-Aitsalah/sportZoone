@@ -12,6 +12,12 @@ enum RoleUtilisateur {
   EMPLOYE
 }
 
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 enum StockMovementType {
   IN
   CORRECTION
@@ -41,16 +47,33 @@ model Utilisateur {
   motDePasse     String
   role           RoleUtilisateur @default(EMPLOYE)
   estActif       Boolean         @default(true)
+  approvalStatus ApprovalStatus  @default(PENDING)
   pointDeVenteId Int?
   pointDeVente   PointDeVente?   @relation(fields: [pointDeVenteId], references: [id])
   caisseId       Int?
   caisse         Caisse?         @relation(fields: [caisseId], references: [id])
   ventes         Vente[]
+  loginApprovalRequests LoginApprovalRequest[]
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
 
   @@index([pointDeVenteId])
   @@index([caisseId])
+  @@index([approvalStatus])
+}
+
+model LoginApprovalRequest {
+  id         Int            @id @default(autoincrement())
+  userId      Int
+  email       String
+  status      ApprovalStatus @default(PENDING)
+  createdAt   DateTime       @default(now())
+  approvedAt  DateTime?
+  user        Utilisateur    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
 }
 
 model Caisse {

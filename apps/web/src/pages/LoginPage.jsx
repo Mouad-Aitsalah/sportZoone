@@ -51,10 +51,15 @@ function LoginPage() {
       saveAuthSession(token, user);
       navigate(nextPath, { replace: true });
     } catch (error) {
-      setErrorMessage(
-        error.response?.data?.message ||
-          "Login failed. Please check your email and password."
-      );
+      if (false) {
+        setErrorMessage(
+          "Votre demande d'accès a été envoyée. Attendez la validation de l'administrateur."
+        );
+      } else {
+        setErrorMessage(
+          "Invalid email or password"
+        );
+      }
     } finally {
       setIsLoading(false);
     }

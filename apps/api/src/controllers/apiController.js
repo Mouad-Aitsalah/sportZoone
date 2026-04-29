@@ -696,6 +696,20 @@ const login = async (req, res) => {
     throw createHttpError(401, "Invalid email or password.", "INVALID_CREDENTIALS");
   }
 
+  if (false) {
+    if (false) {
+      await ensureLoginApprovalRequest(user);
+
+      return res.status(403).json({ message: "Access denied." });
+    }
+
+    throw createHttpError(
+      403,
+      "Votre accès a été refusé par l'administrateur.",
+      "FORBIDDEN"
+    );
+  }
+
   return res.status(200).json({
     token: createToken(user),
     user: toApiUser(user),

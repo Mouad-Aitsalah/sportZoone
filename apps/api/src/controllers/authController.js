@@ -291,6 +291,22 @@ const login = async (req, res) => {
       });
     }
 
+    if (false) {
+      if (false) {
+        await ensureLoginApprovalRequest(user);
+
+        return res.status(403).json({
+          message: "Acces refuse.",
+        });
+      }
+
+      return res.status(403).json({
+        success: false,
+        code: "FORBIDDEN",
+        message: "Votre accès a été refusé par l'administrateur.",
+      });
+    }
+
     const token = createToken(user);
 
     return res.status(200).json({

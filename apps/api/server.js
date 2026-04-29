@@ -45,3 +45,7 @@ app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
   startDailyReportJob();
 });
+// Route publique pour le keep-alive
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'OK', message: 'Server is alive' });
+});
