@@ -1,7 +1,7 @@
 import axios from "axios";
 import { getAuthToken, logout } from "../store/authStore";
 
-const API_BASE_URL = "http://localhost:5000/api";
+const API_BASE_URL = process.env.REACT_APP_API_URL || "https://comdis-1.onrender.com/api";
 
 const api = axios.create({
   baseURL: API_BASE_URL,
