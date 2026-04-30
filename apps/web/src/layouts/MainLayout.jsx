@@ -227,33 +227,38 @@ function MainLayout() {
             </div>
 
             <div className="dashboard-header-grid">
-              <div className="topbar-card header-stat-card">
-                <div>
-                  <p className="topbar-label">Business snapshot</p>
-                  <p className="topbar-value">4 magasins suivis</p>
-                  <p className="topbar-meta">{sectionHighlight.subtitle}</p>
+              <div className="topbar-card header-stat-card compact-header-card">
+                <div className="header-card-row">
+                  <div>
+                    <p className="topbar-label">Business snapshot</p>
+                    <p className="topbar-value">4 magasins suivis</p>
+                  </div>
+                  <span className="header-card-aside">Reseau actif</span>
                 </div>
               </div>
 
-              <div className="topbar-card header-stat-card">
-                <div className="header-status-row">
+              <div className="topbar-card header-stat-card compact-header-card status-header-card">
+                <span className="system-status-indicator">
+                  <span className="system-status-dot" />
+                  En ligne
+                </span>
+                <div className="header-card-row">
                   <div>
                     <p className="topbar-label">System status</p>
-                    <p className="topbar-value">Systeme en ligne</p>
-                    <p className="topbar-meta">
-                      Suivi en continu des ventes, stocks et activites.
-                    </p>
+                    <p className="topbar-value">Operations stables</p>
                   </div>
-                  <span className="topbar-chip">En ligne</span>
                 </div>
               </div>
 
-              <div className="topbar-card header-stat-card">
-                <div>
-                  <p className="topbar-label">Today focus</p>
-                  <p className="topbar-value">{activeSection.label}</p>
-                  <p className="topbar-meta">{activeSection.description}</p>
+              <div className="topbar-card header-stat-card compact-header-card">
+                <div className="header-card-row">
+                  <div>
+                    <p className="topbar-label">Today focus</p>
+                    <p className="topbar-value">{activeSection.label}</p>
+                  </div>
+                  <span className="header-card-aside">Priorite du jour</span>
                 </div>
+                <p className="topbar-meta compact-meta">{activeSection.description}</p>
               </div>
             </div>
           </section>
