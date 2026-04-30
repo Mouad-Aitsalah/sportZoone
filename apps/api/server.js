@@ -38,18 +38,6 @@ app.get("/", authMiddleware, (req, res) => {
   res.json({ message: "Backend API is running" });
 });
 
-app.use(notFoundMiddleware);
-app.use(errorHandlerMiddleware);
-
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-  startDailyReportJob();
-});
-// Route publique pour le keep-alive
-app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'OK', message: 'Server is alive' });
-});
-  
 app.get("/seed", async (req, res) => {
   try {
     const { exec } = require("child_process");
@@ -65,3 +53,19 @@ app.get("/seed", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+app.use(notFoundMiddleware);
+app.use(errorHandlerMiddleware);
+
+app.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
+  startDailyReportJob();
+});
+// Route publique pour le keep-alive
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'OK', message: 'Server is alive' });
+});
+
+
+
+
