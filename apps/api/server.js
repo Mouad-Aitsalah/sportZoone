@@ -38,21 +38,7 @@ app.get("/", authMiddleware, (req, res) => {
   res.json({ message: "Backend API is running" });
 });
 
-app.get("/seed", async (req, res) => {
-  try {
-    const { exec } = require("child_process");
 
-    exec("node prisma/seed.js", (error, stdout, stderr) => {
-      if (error) {
-        return res.status(500).json({ error: error.message });
-      }
-      res.send("Seed executed successfully");
-    });
-
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
 
 app.use(notFoundMiddleware);
 app.use(errorHandlerMiddleware);
