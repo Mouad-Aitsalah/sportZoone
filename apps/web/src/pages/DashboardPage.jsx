@@ -167,6 +167,57 @@ function DashboardPage() {
       </div>
 
       <SectionCard
+        title="Alertes stock"
+        description="Produits en rupture ou sous seuil minimum dans le reseau."
+        actions={
+          <button
+            className="ghost-button"
+            type="button"
+            onClick={() => setIsAlertsModalOpen(true)}
+          >
+            Voir alertes
+          </button>
+        }
+      >
+        <div className="stock-alert-summary">
+          <div className="stock-alert-summary-card critical">
+            <span>Produits en rupture</span>
+            <strong>{isLoading ? "..." : criticalStockCount}</strong>
+          </div>
+          <div className="stock-alert-summary-card warning">
+            <span>Produits en stock faible</span>
+            <strong>{isLoading ? "..." : warningStockCount}</strong>
+          </div>
+        </div>
+
+        <div className="dashboard-alert-list">
+          <div className="alert-item">
+            <div>
+              <strong>Alertes actives</strong>
+              <span>
+                {isLoading
+                  ? "Analyse des seuils en cours."
+                  : `${lowStockCount} produits necessitent une attention.`}
+              </span>
+            </div>
+            <Badge tone={criticalStockCount > 0 ? "stock-critical" : "stock-warning"}>
+              {isLoading ? "..." : lowStockCount}
+            </Badge>
+          </div>
+
+          <div className="alert-item">
+            <div>
+              <strong>Ruptures critiques</strong>
+              <span>Produits a zero a reapprovisionner en priorite.</span>
+            </div>
+            <Badge tone={criticalStockCount > 0 ? "stock-critical" : "neutral"}>
+              {isLoading ? "..." : criticalStockCount}
+            </Badge>
+          </div>
+        </div>
+      </SectionCard>
+
+      <SectionCard
         title="Evolution des ventes"
         description="Lecture rapide du revenu jour apres jour sur la periode selectionnee."
         className="analytics-card dashboard-hero-chart"
@@ -219,57 +270,6 @@ function DashboardPage() {
           emptyTitle="Aucun produit vendu"
           emptyDescription={emptySalesMessage}
         />
-      </SectionCard>
-
-      <SectionCard
-        title="Alertes stock"
-        description="Produits en rupture ou sous seuil minimum dans le reseau."
-        actions={
-          <button
-            className="ghost-button"
-            type="button"
-            onClick={() => setIsAlertsModalOpen(true)}
-          >
-            Voir alertes
-          </button>
-        }
-      >
-        <div className="stock-alert-summary">
-          <div className="stock-alert-summary-card critical">
-            <span>Produits en rupture</span>
-            <strong>{isLoading ? "..." : criticalStockCount}</strong>
-          </div>
-          <div className="stock-alert-summary-card warning">
-            <span>Produits en stock faible</span>
-            <strong>{isLoading ? "..." : warningStockCount}</strong>
-          </div>
-        </div>
-
-        <div className="dashboard-alert-list">
-          <div className="alert-item">
-            <div>
-              <strong>Alertes actives</strong>
-              <span>
-                {isLoading
-                  ? "Analyse des seuils en cours."
-                  : `${lowStockCount} produits necessitent une attention.`}
-              </span>
-            </div>
-            <Badge tone={criticalStockCount > 0 ? "stock-critical" : "stock-warning"}>
-              {isLoading ? "..." : lowStockCount}
-            </Badge>
-          </div>
-
-          <div className="alert-item">
-            <div>
-              <strong>Ruptures critiques</strong>
-              <span>Produits a zero a reapprovisionner en priorite.</span>
-            </div>
-            <Badge tone={criticalStockCount > 0 ? "stock-critical" : "neutral"}>
-              {isLoading ? "..." : criticalStockCount}
-            </Badge>
-          </div>
-        </div>
       </SectionCard>
 
       <Modal
