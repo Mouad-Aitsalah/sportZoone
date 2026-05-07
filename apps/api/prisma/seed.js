@@ -2,675 +2,636 @@ require("dotenv").config();
 
 const bcrypt = require("bcryptjs");
 const { PrismaClient } = require("@prisma/client");
+const {
+  buildNextNumeroCompte,
+  COMPTE_TYPES,
+  DEFAULT_SUPPLIER_NAME,
+} = require("../src/services/compteService");
 
 const prisma = new PrismaClient();
+const GLOBAL_ORGANISATION_NAME = "SportZone Global";
+const SUPER_ADMIN_EMAIL = "superadmin@sportzone.local";
 
-const MAIN_ORGANISATION_NAME = "Manager 1";
-const PROTECTED_EMPLOYEE_EMAILS = [
-  "caisse1@comdis.local",
-  "caisse2@comdis.local",
-  "caisse3@comdis.local",
-  "caisse4@comdis.local",
-  "caisse5@comdis.local",
-  "caisse6@comdis.local",
-];
-const PROTECTED_EMAILS = ["admin@comdis.local", ...PROTECTED_EMPLOYEE_EMAILS];
-
-const mainOrganisationConfig = {
-  name: MAIN_ORGANISATION_NAME,
-  admin: {
-    nom: "Administrateur Principal",
-    email: "admin@comdis.local",
-    password: "Admin12345",
+const categories = [
+  { code: "CREATINE", nom: "Creatine", nomComplet: "Creatine" },
+  { code: "OLIGO_ELEMENT", nom: "Oligo-element", nomComplet: "Oligo-element" },
+  { code: "WHEY", nom: "Whey", nomComplet: "Whey" },
+  { code: "PRE_WORKOUT", nom: "Pre-workout", nomComplet: "Pre-workout" },
+  { code: "T_SHIRT", nom: "T-shirt", nomComplet: "T-shirt" },
+  { code: "SHAKERS", nom: "SHAKERS", nomComplet: "SHAKERS" },
+  { code: "SAUCES", nom: "SAUCES", nomComplet: "SAUCES" },
+  { code: "MAILLOT", nom: "Maillot", nomComplet: "Maillot" },
+  { code: "KICKBOXING", nom: "Kickboxing", nomComplet: "Kickboxing" },
+  { code: "PANTALON", nom: "Pantalon", nomComplet: "Pantalon" },
+  { code: "NATATION", nom: "Natation", nomComplet: "Natation" },
+  {
+    code: "NUTRITION_SPORTIVE",
+    nom: "Nutrition Sportive",
+    nomComplet: "Nutrition Sportive",
   },
-  stores: [
-    {
-      nom: "Point de Vente Centre",
-      adresse: "12 Avenue Hassan II",
-      telephone: "0600000001",
+  { code: "SHORT", nom: "Short", nomComplet: "Short" },
+  { code: "ESPACE_FEMME", nom: "Espace Femme", nomComplet: "Espace Femme" },
+  { code: "CHAUSSURES", nom: "Chaussures", nomComplet: "Chaussures" },
+  {
+    code: "EQUIPEMENT_ACCESSOIRES",
+    nom: "Equipement et accessoires",
+    nomComplet: "Equipement et accessoires",
+  },
+  { code: "COLLAGEN", nom: "Collagen", nomComplet: "Collagen" },
+  {
+    code: "EQUIPIMENT_ACCESSOIRES_FOOT",
+    nom: "Equipiment et accessoires de Foot",
+    nomComplet: "Equipiment et accessoires de Foot",
+  },
+  { code: "BASKET", nom: "Basket", nomComplet: "Basket" },
+  { code: "VOLLEY", nom: "Volley", nomComplet: "Volley" },
+];
+
+const organisationSeeds = [
+  {
+    name: "SportZone Rabat",
+    storeName: "SportZone Rabat",
+    storeAddress: "Avenue Mohammed V, Rabat",
+    storePhone: "0537000001",
+    admin: {
+      name: "Admin Rabat",
+      email: "admin-rabat@sportzone.local",
+      password: "Admin12345",
     },
-    {
-      nom: "Point de Vente Nord",
-      adresse: "25 Rue Atlas",
-      telephone: "0600000002",
+    cashier: {
+      name: "Caissier Rabat",
+      email: "caissier-rabat@sportzone.local",
+      password: "Caisse12345",
     },
-    {
-      nom: "Point de Vente Sud",
-      adresse: "8 Boulevard Mohammed V",
-      telephone: "0600000003",
-    },
-    {
-      nom: "Point de Vente Est",
-      adresse: "44 Rue Al Amal",
-      telephone: "0600000004",
-    },
-  ],
-  cashRegistersByStore: [
-    [
-      { nom: "Caisse 1", code: "M1-STORE1-CAISSE1" },
-      { nom: "Caisse 2", code: "M1-STORE1-CAISSE2" },
+    suppliers: [
+      {
+        key: "atlas-rabat",
+        nom: "Atlas Sport Rabat",
+        email: "atlas-rabat@sportzone.local",
+        telephone: "0600001001",
+        adresse: "Rabat",
+      },
+      {
+        key: "run-rabat",
+        nom: "Run Pro Rabat",
+        email: "run-rabat@sportzone.local",
+        telephone: "0600001002",
+        adresse: "Temara",
+      },
     ],
-    [
-      { nom: "Caisse 1", code: "M1-STORE2-CAISSE1" },
-      { nom: "Caisse 2", code: "M1-STORE2-CAISSE2" },
+    products: [
+      {
+        codeBarres: "6201000000011",
+        nom: "Ballon Football",
+        categoryCode: "EQUIPIMENT_ACCESSOIRES_FOOT",
+        supplierKey: "atlas-rabat",
+        prixAchat: 90,
+        prixDetail: 140,
+        seuilMinimum: 5,
+        variants: [
+          { taille: "Unique", couleur: null, codeBarres: "6201000000011001", stock: 18 },
+        ],
+      },
+      {
+        codeBarres: "6201000000012",
+        nom: "Maillot Sport",
+        categoryCode: "MAILLOT",
+        supplierKey: "atlas-rabat",
+        prixAchat: 110,
+        prixDetail: 180,
+        seuilMinimum: 6,
+        variants: [
+          { taille: "S", couleur: "Rouge", codeBarres: "6201000000012001", stock: 4 },
+          { taille: "M", couleur: "Rouge", codeBarres: "6201000000012002", stock: 5 },
+          { taille: "L", couleur: "Bleu", codeBarres: "6201000000012003", stock: 6 },
+          { taille: "XL", couleur: "Noir", codeBarres: "6201000000012004", stock: 5 },
+        ],
+      },
+      {
+        codeBarres: "6201000000013",
+        nom: "Chaussures Running",
+        categoryCode: "CHAUSSURES",
+        supplierKey: "run-rabat",
+        prixAchat: 320,
+        prixDetail: 470,
+        seuilMinimum: 4,
+        variants: [
+          { taille: "40", couleur: "Noir", codeBarres: "6201000000013001", stock: 3 },
+          { taille: "41", couleur: "Noir", codeBarres: "6201000000013002", stock: 3 },
+          { taille: "42", couleur: "Blanc", codeBarres: "6201000000013003", stock: 3 },
+          { taille: "43", couleur: "Bleu", codeBarres: "6201000000013004", stock: 3 },
+        ],
+      },
+      {
+        codeBarres: "6201000000014",
+        nom: "Gants Gardien",
+        categoryCode: "EQUIPIMENT_ACCESSOIRES_FOOT",
+        supplierKey: "atlas-rabat",
+        prixAchat: 85,
+        prixDetail: 135,
+        seuilMinimum: 4,
+        variants: [
+          { taille: "M", couleur: "Noir", codeBarres: "6201000000014001", stock: 4 },
+          { taille: "L", couleur: "Noir", codeBarres: "6201000000014002", stock: 3 },
+          { taille: "XL", couleur: "Bleu", codeBarres: "6201000000014003", stock: 3 },
+        ],
+      },
+      {
+        codeBarres: "6201000000015",
+        nom: "Bouteille Sport",
+        categoryCode: "SHAKERS",
+        supplierKey: "run-rabat",
+        prixAchat: 28,
+        prixDetail: 49,
+        seuilMinimum: 8,
+        variants: [
+          { taille: "Unique", couleur: null, codeBarres: "6201000000015001", stock: 30 },
+        ],
+      },
+      {
+        codeBarres: "6201000000016",
+        nom: "Sac de Sport",
+        categoryCode: "EQUIPEMENT_ACCESSOIRES",
+        supplierKey: "atlas-rabat",
+        prixAchat: 150,
+        prixDetail: 230,
+        seuilMinimum: 3,
+        variants: [
+          { taille: "Unique", couleur: "Noir", codeBarres: "6201000000016001", stock: 9 },
+        ],
+      },
     ],
-    [{ nom: "Caisse 1", code: "M1-STORE3-CAISSE1" }],
-    [{ nom: "Caisse 1", code: "M1-STORE4-CAISSE1" }],
-  ],
-  employees: [
-    {
-      nom: "Employe Caisse 1",
-      email: "caisse1@comdis.local",
+  },
+  {
+    name: "SportZone Casa",
+    storeName: "SportZone Casa",
+    storeAddress: "Boulevard Zerktouni, Casablanca",
+    storePhone: "0522000002",
+    admin: {
+      name: "Admin Casa",
+      email: "admin-casa@sportzone.local",
+      password: "Admin12345",
+    },
+    cashier: {
+      name: "Caissier Casa",
+      email: "caissier-casa@sportzone.local",
       password: "Caisse12345",
-      storeIndex: 0,
-      cashRegisterIndex: 0,
     },
-    {
-      nom: "Employe Caisse 2",
-      email: "caisse2@comdis.local",
-      password: "Caisse12345",
-      storeIndex: 0,
-      cashRegisterIndex: 1,
-    },
-    {
-      nom: "Employe Caisse 3",
-      email: "caisse3@comdis.local",
-      password: "Caisse12345",
-      storeIndex: 1,
-      cashRegisterIndex: 0,
-    },
-    {
-      nom: "Employe Caisse 4",
-      email: "caisse4@comdis.local",
-      password: "Caisse12345",
-      storeIndex: 1,
-      cashRegisterIndex: 1,
-    },
-    {
-      nom: "Employe Caisse 5",
-      email: "caisse5@comdis.local",
-      password: "Caisse12345",
-      storeIndex: 2,
-      cashRegisterIndex: 0,
-    },
-    {
-      nom: "Employe Caisse 6",
-      email: "caisse6@comdis.local",
-      password: "Caisse12345",
-      storeIndex: 3,
-      cashRegisterIndex: 0,
-    },
-  ],
-  supplierSeed: [
-    {
-      nom: "Atlas Boissons",
-      email: "contact+manager1-atlas@comdis.local",
-      telephone: "0611111111",
-      adresse: "Casablanca",
-    },
-    {
-      nom: "Marche Epicerie",
-      email: "contact+manager1-epicerie@comdis.local",
-      telephone: "0622222222",
-      adresse: "Rabat",
-    },
-  ],
-  productSeed: [
-    {
-      codeBarres: "6111000001011",
-      nom: "Coca Cola 33cl",
-      categorie: "Boissons",
-      prixAchat: 4.5,
-      prixVente: 6.5,
-      seuilMinimum: 10,
-      supplierIndex: 0,
-    },
-    {
-      codeBarres: "6111000001012",
-      nom: "Eau Minerale 1.5L",
-      categorie: "Boissons",
-      prixAchat: 2.5,
-      prixVente: 4,
-      seuilMinimum: 12,
-      supplierIndex: 0,
-    },
-    {
-      codeBarres: "6111000001013",
-      nom: "Biscuits Chocolat",
-      categorie: "Snacks",
-      prixAchat: 3,
-      prixVente: 5,
-      seuilMinimum: 8,
-      supplierIndex: 1,
-    },
-    {
-      codeBarres: "6111000001014",
-      nom: "Riz 1kg",
-      categorie: "Epicerie",
-      prixAchat: 10,
-      prixVente: 14,
-      seuilMinimum: 6,
-      supplierIndex: 1,
-    },
-    {
-      codeBarres: "6111000001015",
-      nom: "Savon Liquide",
-      categorie: "Hygiene",
-      prixAchat: 12,
-      prixVente: 18,
-      seuilMinimum: 5,
-      supplierIndex: 1,
-    },
-  ],
-  stockSeed: [
-    { productIndex: 0, storeIndex: 0, quantite: 50 },
-    { productIndex: 1, storeIndex: 0, quantite: 80 },
-    { productIndex: 2, storeIndex: 0, quantite: 30 },
-    { productIndex: 3, storeIndex: 1, quantite: 25 },
-    { productIndex: 4, storeIndex: 1, quantite: 20 },
-    { productIndex: 0, storeIndex: 2, quantite: 40 },
-    { productIndex: 2, storeIndex: 2, quantite: 18 },
-    { productIndex: 1, storeIndex: 3, quantite: 60 },
-    { productIndex: 3, storeIndex: 3, quantite: 15 },
-    { productIndex: 4, storeIndex: 3, quantite: 10 },
-  ],
-};
+    suppliers: [
+      {
+        key: "fit-casa",
+        nom: "Fit Market Casa",
+        email: "fit-casa@sportzone.local",
+        telephone: "0600002001",
+        adresse: "Casablanca",
+      },
+      {
+        key: "combat-casa",
+        nom: "Combat Gear Casa",
+        email: "combat-casa@sportzone.local",
+        telephone: "0600002002",
+        adresse: "Mohammedia",
+      },
+    ],
+    products: [
+      {
+        codeBarres: "6202000000011",
+        nom: "Whey Gold",
+        categoryCode: "WHEY",
+        supplierKey: "fit-casa",
+        prixAchat: 260,
+        prixDetail: 360,
+        seuilMinimum: 5,
+        variants: [
+          { taille: "900G", couleur: "Vanille", codeBarres: "6202000000011001", stock: 12 },
+          { taille: "2KG", couleur: "Chocolat", codeBarres: "6202000000011002", stock: 8 },
+        ],
+      },
+      {
+        codeBarres: "6202000000012",
+        nom: "Creatine Monohydrate",
+        categoryCode: "CREATINE",
+        supplierKey: "fit-casa",
+        prixAchat: 110,
+        prixDetail: 165,
+        seuilMinimum: 6,
+        variants: [
+          { taille: "300G", couleur: "Standard", codeBarres: "6202000000012001", stock: 16 },
+        ],
+      },
+      {
+        codeBarres: "6202000000013",
+        nom: "Short Training",
+        categoryCode: "SHORT",
+        supplierKey: "fit-casa",
+        prixAchat: 70,
+        prixDetail: 120,
+        seuilMinimum: 5,
+        variants: [
+          { taille: "M", couleur: "Noir", codeBarres: "6202000000013001", stock: 7 },
+          { taille: "L", couleur: "Noir", codeBarres: "6202000000013002", stock: 6 },
+          { taille: "XL", couleur: "Bleu", codeBarres: "6202000000013003", stock: 5 },
+        ],
+      },
+      {
+        codeBarres: "6202000000014",
+        nom: "T-shirt Performance",
+        categoryCode: "T_SHIRT",
+        supplierKey: "fit-casa",
+        prixAchat: 80,
+        prixDetail: 135,
+        seuilMinimum: 4,
+        variants: [
+          { taille: "S", couleur: "Blanc", codeBarres: "6202000000014001", stock: 5 },
+          { taille: "M", couleur: "Blanc", codeBarres: "6202000000014002", stock: 5 },
+          { taille: "L", couleur: "Vert", codeBarres: "6202000000014003", stock: 4 },
+        ],
+      },
+      {
+        codeBarres: "6202000000015",
+        nom: "Gants Kickboxing",
+        categoryCode: "KICKBOXING",
+        supplierKey: "combat-casa",
+        prixAchat: 190,
+        prixDetail: 280,
+        seuilMinimum: 3,
+        variants: [
+          { taille: "10OZ", couleur: "Rouge", codeBarres: "6202000000015001", stock: 4 },
+          { taille: "12OZ", couleur: "Noir", codeBarres: "6202000000015002", stock: 4 },
+        ],
+      },
+      {
+        codeBarres: "6202000000016",
+        nom: "Shaker Pro",
+        categoryCode: "SHAKERS",
+        supplierKey: "fit-casa",
+        prixAchat: 25,
+        prixDetail: 45,
+        seuilMinimum: 8,
+        variants: [
+          { taille: "Unique", couleur: "Noir", codeBarres: "6202000000016001", stock: 24 },
+        ],
+      },
+    ],
+  },
+];
 
-const managerCleanupStoreWhere = {
-  OR: [
-    { nom: { contains: "Manager 2", mode: "insensitive" } },
-    { nom: { contains: "Manager 3", mode: "insensitive" } },
-  ],
-};
-
-const managerCleanupUserWhere = {
-  OR: [
-    { email: "manager2@comdis.local" },
-    { email: "manager3@comdis.local" },
-    { email: { startsWith: "m2-caisse" } },
-    { email: { startsWith: "m3-caisse" } },
-  ],
-};
-
-async function upsertOrganisation(name) {
-  return prisma.organisation.upsert({
-    where: { name },
-    update: { name },
-    create: { name },
+async function resetCopiedProjectData() {
+  await prisma.organisation.deleteMany({
+    where: {
+      name: {
+        in: [
+          "Manager 1",
+          "Manager 2",
+          "Manager 3",
+          "SportZone",
+          GLOBAL_ORGANISATION_NAME,
+          "SportZone Rabat",
+          "SportZone Casa",
+        ],
+      },
+    },
   });
 }
 
-async function upsertPointDeVente(data) {
-  const existingPointDeVente = await prisma.pointDeVente.findFirst({
+async function ensureDefaultSupplier(prismaClient, organisationId) {
+  const existingSupplier = await prismaClient.fournisseur.findFirst({
     where: {
-      organisationId: data.organisationId,
-      OR: [
-        { telephone: data.telephone },
-        {
-          nom: data.nom,
-          adresse: data.adresse,
-        },
-      ],
+      organisationId,
+      nom: {
+        equals: DEFAULT_SUPPLIER_NAME,
+        mode: "insensitive",
+      },
+    },
+    include: {
+      compte: true,
     },
     orderBy: {
       id: "asc",
     },
   });
 
-  if (existingPointDeVente) {
-    return prisma.pointDeVente.update({
-      where: { id: existingPointDeVente.id },
-      data,
-    });
+  if (existingSupplier?.compte) {
+    return {
+      fournisseur: existingSupplier,
+      compte: existingSupplier.compte,
+    };
   }
 
-  return prisma.pointDeVente.create({ data });
-}
-
-async function upsertCaisse(data) {
-  const existingCaisse = await prisma.caisse.findFirst({
-    where: {
-      organisationId: data.organisationId,
-      code: data.code,
-    },
-  });
-
-  if (existingCaisse) {
-    return prisma.caisse.update({
-      where: { id: existingCaisse.id },
-      data,
-    });
-  }
-
-  return prisma.caisse.create({ data });
-}
-
-async function upsertClient(data) {
-  const existingClient = await prisma.client.findFirst({
-    where: {
-      organisationId: data.organisationId,
-      numeroClient: data.numeroClient,
-    },
-  });
-
-  if (existingClient) {
-    return prisma.client.update({
-      where: { id: existingClient.id },
-      data,
-    });
-  }
-
-  return prisma.client.create({ data });
-}
-
-async function upsertSupplier(data) {
-  const existingSupplier = await prisma.fournisseur.findFirst({
-    where: {
-      organisationId: data.organisationId,
-      email: data.email,
-    },
-  });
+  const numeroCompte = await buildNextNumeroCompte(
+    prismaClient,
+    organisationId,
+    COMPTE_TYPES.FOURNISSEUR
+  );
 
   if (existingSupplier) {
-    return prisma.fournisseur.update({
-      where: { id: existingSupplier.id },
-      data,
-    });
-  }
-
-  return prisma.fournisseur.create({ data });
-}
-
-async function upsertProduct(data) {
-  const existingProduct = await prisma.produit.findFirst({
-    where: {
-      organisationId: data.organisationId,
-      codeBarres: data.codeBarres,
-    },
-  });
-
-  if (existingProduct) {
-    return prisma.produit.update({
-      where: { id: existingProduct.id },
-      data,
-    });
-  }
-
-  return prisma.produit.create({ data });
-}
-
-async function upsertStockEntry(data) {
-  return prisma.stock.upsert({
-    where: {
-      organisationId_produitId_pointDeVenteId: {
-        organisationId: data.organisationId,
-        produitId: data.produitId,
-        pointDeVenteId: data.pointDeVenteId,
-      },
-    },
-    update: {
-      quantite: data.quantite,
-    },
-    create: data,
-  });
-}
-
-async function upsertUser(data) {
-  return prisma.utilisateur.upsert({
-    where: {
-      email: data.email,
-    },
-    update: data,
-    create: data,
-  });
-}
-
-async function cleanupLegacyManagerOrganisations() {
-  const organisationsToDelete = await prisma.organisation.findMany({
-    where: {
-      OR: [
-        { name: "Manager 2" },
-        { name: "Manager 3" },
-      ],
-    },
-    select: {
-      id: true,
-      name: true,
-    },
-  });
-
-  if (!organisationsToDelete.length) {
-    return;
-  }
-
-  await prisma.organisation.deleteMany({
-    where: {
-      id: {
-        in: organisationsToDelete.map((organisation) => organisation.id),
-      },
-    },
-  });
-}
-
-async function cleanupLegacyManagerStoresAndUsers() {
-  const leftoverStores = await prisma.pointDeVente.findMany({
-    where: managerCleanupStoreWhere,
-    select: {
-      id: true,
-    },
-  });
-  const leftoverStoreIds = leftoverStores.map((store) => store.id);
-
-  const leftoverCashRegisters = leftoverStoreIds.length
-    ? await prisma.caisse.findMany({
-        where: {
-          pointDeVenteId: {
-            in: leftoverStoreIds,
-          },
-        },
-        select: {
-          id: true,
-        },
-      })
-    : [];
-  const leftoverCashRegisterIds = leftoverCashRegisters.map((caisse) => caisse.id);
-
-  const protectedUsersToDetach = await prisma.utilisateur.findMany({
-    where: {
-      email: {
-        in: PROTECTED_EMAILS,
-      },
-      OR: [
-        leftoverStoreIds.length
-          ? {
-              pointDeVenteId: {
-                in: leftoverStoreIds,
-              },
-            }
-          : undefined,
-        leftoverCashRegisterIds.length
-          ? {
-              caisseId: {
-                in: leftoverCashRegisterIds,
-              },
-            }
-          : undefined,
-      ].filter(Boolean),
-    },
-    select: {
-      id: true,
-    },
-  });
-
-  if (protectedUsersToDetach.length) {
-    await prisma.utilisateur.updateMany({
-      where: {
-        id: {
-          in: protectedUsersToDetach.map((user) => user.id),
-        },
-      },
+    const compte = await prismaClient.compte.create({
       data: {
-        pointDeVenteId: null,
-        caisseId: null,
+        organisationId,
+        numeroCompte,
+        type: COMPTE_TYPES.FOURNISSEUR,
+        nom: existingSupplier.nom,
+        actif: true,
+        fournisseurSourceId: existingSupplier.id,
       },
     });
+
+    return {
+      fournisseur: existingSupplier,
+      compte,
+    };
   }
 
-  const usersToDelete = await prisma.utilisateur.findMany({
-    where: {
-      email: {
-        notIn: PROTECTED_EMAILS,
-      },
-      OR: [
-        managerCleanupUserWhere,
-        leftoverStoreIds.length
-          ? {
-              pointDeVenteId: {
-                in: leftoverStoreIds,
-              },
-            }
-          : undefined,
-        leftoverCashRegisterIds.length
-          ? {
-              caisseId: {
-                in: leftoverCashRegisterIds,
-              },
-            }
-          : undefined,
-      ].filter(Boolean),
-    },
-    select: {
-      id: true,
+  const fournisseur = await prismaClient.fournisseur.create({
+    data: {
+      organisationId,
+      nom: DEFAULT_SUPPLIER_NAME,
     },
   });
-  const userIdsToDelete = usersToDelete.map((user) => user.id);
 
-  const salesToDelete = leftoverStoreIds.length
-    ? await prisma.vente.findMany({
-        where: {
-          pointDeVenteId: {
-            in: leftoverStoreIds,
-          },
-        },
-        select: {
-          id: true,
-        },
-      })
-    : [];
-  const saleIdsToDelete = salesToDelete.map((sale) => sale.id);
-
-  if (userIdsToDelete.length) {
-    await prisma.loginApprovalRequest.deleteMany({
-      where: {
-        userId: {
-          in: userIdsToDelete,
-        },
-      },
-    });
-  }
-
-  if (saleIdsToDelete.length) {
-    await prisma.retour.deleteMany({
-      where: {
-        venteId: {
-          in: saleIdsToDelete,
-        },
-      },
-    });
-
-    await prisma.venteLigne.deleteMany({
-      where: {
-        venteId: {
-          in: saleIdsToDelete,
-        },
-      },
-    });
-
-    await prisma.vente.deleteMany({
-      where: {
-        id: {
-          in: saleIdsToDelete,
-        },
-      },
-    });
-  }
-
-  if (leftoverStoreIds.length) {
-    await prisma.stockMovement.deleteMany({
-      where: {
-        pointDeVenteId: {
-          in: leftoverStoreIds,
-        },
-      },
-    });
-
-    await prisma.stock.deleteMany({
-      where: {
-        pointDeVenteId: {
-          in: leftoverStoreIds,
-        },
-      },
-    });
-  }
-
-  if (userIdsToDelete.length) {
-    await prisma.utilisateur.deleteMany({
-      where: {
-        id: {
-          in: userIdsToDelete,
-        },
-      },
-    });
-  }
-
-  if (leftoverCashRegisterIds.length) {
-    await prisma.caisse.deleteMany({
-      where: {
-        id: {
-          in: leftoverCashRegisterIds,
-        },
-      },
-    });
-  }
-
-  if (leftoverStoreIds.length) {
-    await prisma.pointDeVente.deleteMany({
-      where: {
-        id: {
-          in: leftoverStoreIds,
-        },
-      },
-    });
-  }
-}
-
-async function cleanupLegacyManagerData() {
-  console.log("Cleaning legacy Manager 2 / Manager 3 data...");
-  await cleanupLegacyManagerOrganisations();
-  await cleanupLegacyManagerStoresAndUsers();
-}
-
-async function seedMainOrganisation(config) {
-  const organisation = await upsertOrganisation(config.name);
-  const hashedAdminPassword = await bcrypt.hash(config.admin.password, 10);
-
-  const stores = [];
-
-  for (const storeData of config.stores) {
-    const store = await upsertPointDeVente({
-      organisationId: organisation.id,
-      ...storeData,
-    });
-    stores.push(store);
-  }
-
-  const cashRegisters = [];
-
-  for (const [storeIndex, store] of stores.entries()) {
-    const cashRegistersForStore = [];
-
-    for (const cashRegisterData of config.cashRegistersByStore[storeIndex]) {
-      const cashRegister = await upsertCaisse({
-        organisationId: organisation.id,
-        pointDeVenteId: store.id,
-        estActive: true,
-        ...cashRegisterData,
-      });
-
-      cashRegistersForStore.push(cashRegister);
-    }
-
-    cashRegisters.push(cashRegistersForStore);
-  }
-
-  await upsertUser({
-    organisationId: organisation.id,
-    nom: config.admin.nom,
-    email: config.admin.email,
-    motDePasse: hashedAdminPassword,
-    role: "ADMIN",
-    estActif: true,
-    approvalStatus: "APPROVED",
-    pointDeVenteId: null,
-    caisseId: null,
+  const compte = await prismaClient.compte.create({
+    data: {
+      organisationId,
+      numeroCompte,
+      type: COMPTE_TYPES.FOURNISSEUR,
+      nom: DEFAULT_SUPPLIER_NAME,
+      actif: true,
+      fournisseurSourceId: fournisseur.id,
+    },
   });
 
-  for (const employee of config.employees) {
-    const hashedEmployeePassword = await bcrypt.hash(employee.password, 10);
-    const store = stores[employee.storeIndex];
-    const cashRegister = cashRegisters[employee.storeIndex][employee.cashRegisterIndex];
+  return {
+    fournisseur,
+    compte,
+  };
+}
 
-    await upsertUser({
+async function createOrganisationSeed(config, passwordHashes) {
+  const organisation = await prisma.organisation.create({
+    data: {
+      name: config.name,
+    },
+  });
+
+  const store = await prisma.pointDeVente.create({
+    data: {
       organisationId: organisation.id,
-      nom: employee.nom,
-      email: employee.email,
-      motDePasse: hashedEmployeePassword,
+      nom: config.storeName,
+      adresse: config.storeAddress,
+      telephone: config.storePhone,
+    },
+  });
+
+  const cashRegister = await prisma.caisse.create({
+    data: {
+      organisationId: organisation.id,
+      nom: "Caisse 1",
+      code: `${config.name.toUpperCase().replace(/[^A-Z0-9]+/g, "-")}-CAISSE-1`,
+      pointDeVenteId: store.id,
+      estActive: true,
+    },
+  });
+
+  const admin = await prisma.utilisateur.create({
+    data: {
+      organisationId: organisation.id,
+      nom: config.admin.name,
+      email: config.admin.email,
+      motDePasse: passwordHashes.admin,
+      role: "ADMIN",
+      estActif: true,
+      approvalStatus: "APPROVED",
+    },
+  });
+
+  const cashier = await prisma.utilisateur.create({
+    data: {
+      organisationId: organisation.id,
+      nom: config.cashier.name,
+      email: config.cashier.email,
+      motDePasse: passwordHashes.cashier,
       role: "EMPLOYE",
       estActif: true,
       approvalStatus: "APPROVED",
       pointDeVenteId: store.id,
       caisseId: cashRegister.id,
-    });
-  }
-
-  await upsertClient({
-    organisationId: organisation.id,
-    numeroClient: 1,
-    nom: "Client inconnu",
-    telephone: null,
-    email: null,
-    credit: 0,
-    estActif: true,
+    },
   });
 
-  const suppliers = [];
-
-  for (const supplierData of config.supplierSeed) {
-    const supplier = await upsertSupplier({
+  await prisma.sessionCaisse.create({
+    data: {
       organisationId: organisation.id,
-      ...supplierData,
-    });
-    suppliers.push(supplier);
-  }
+      numeroSession: "POS/1",
+      caisseId: cashRegister.id,
+      pointDeVenteId: store.id,
+      utilisateurId: cashier.id,
+      statut: "OUVERTE",
+      totalVentes: 0,
+      nombreTickets: 0,
+    },
+  });
 
-  const products = [];
-
-  for (const productData of config.productSeed) {
-    const product = await upsertProduct({
+  const defaultCustomer = await prisma.client.create({
+    data: {
       organisationId: organisation.id,
-      codeBarres: productData.codeBarres,
-      nom: productData.nom,
-      categorie: productData.categorie,
-      prixAchat: productData.prixAchat,
-      prixVente: productData.prixVente,
-      seuilMinimum: productData.seuilMinimum,
+      numeroClient: 1,
+      nom: "Client inconnu",
+      credit: 0,
       estActif: true,
-      fournisseurId: suppliers[productData.supplierIndex].id,
+    },
+  });
+
+  await prisma.compte.create({
+    data: {
+      organisationId: organisation.id,
+      numeroCompte: "CL-0001",
+      type: "CLIENT",
+      nom: "Client inconnu",
+      actif: true,
+      clientSourceId: defaultCustomer.id,
+    },
+  });
+
+  const categoryMap = new Map();
+
+  for (const category of categories) {
+    const createdCategory = await prisma.categorieProduit.create({
+      data: {
+        organisationId: organisation.id,
+        code: category.code,
+        nom: category.nom,
+        nomComplet: category.nomComplet,
+        actif: true,
+      },
     });
-    products.push(product);
+
+    categoryMap.set(category.code, createdCategory);
   }
 
-  for (const stockEntry of config.stockSeed) {
-    await upsertStockEntry({
-      organisationId: organisation.id,
-      produitId: products[stockEntry.productIndex].id,
-      pointDeVenteId: stores[stockEntry.storeIndex].id,
-      quantite: stockEntry.quantite,
+  const supplierMap = new Map();
+  const defaultSupplier = await ensureDefaultSupplier(prisma, organisation.id);
+
+  supplierMap.set("autre", defaultSupplier);
+
+  for (const supplier of config.suppliers) {
+    const fournisseur = await prisma.fournisseur.create({
+      data: {
+        organisationId: organisation.id,
+        nom: supplier.nom,
+        email: supplier.email,
+        telephone: supplier.telephone,
+        adresse: supplier.adresse,
+      },
+    });
+
+    const numeroCompte = await buildNextNumeroCompte(
+      prisma,
+      organisation.id,
+      COMPTE_TYPES.FOURNISSEUR
+    );
+
+    const compte = await prisma.compte.create({
+      data: {
+        organisationId: organisation.id,
+        numeroCompte,
+        type: COMPTE_TYPES.FOURNISSEUR,
+        nom: supplier.nom,
+        telephone: supplier.telephone,
+        email: supplier.email,
+        adresse: supplier.adresse,
+        actif: true,
+        fournisseurSourceId: fournisseur.id,
+      },
+    });
+
+    supplierMap.set(supplier.key, {
+      fournisseur,
+      compte,
     });
   }
+
+  for (const product of config.products) {
+    const category = categoryMap.get(product.categoryCode);
+    const supplier = supplierMap.get(product.supplierKey);
+
+    const createdProduct = await prisma.produit.create({
+      data: {
+        organisationId: organisation.id,
+        codeBarres: product.codeBarres,
+        nom: product.nom,
+        categorie: category.nom,
+        categorieId: category.id,
+        prixAchat: product.prixAchat,
+        prixVente: product.prixDetail,
+        tauxTVA: 20,
+        prixDetail: product.prixDetail,
+        prixGros: product.prixDetail,
+        prixMiniGros: product.prixDetail,
+        seuilMinimum: product.seuilMinimum,
+        estActif: true,
+        fournisseurId: supplier?.fournisseur.id || null,
+      },
+    });
+
+    const totalVariantStock = (product.variants || []).reduce(
+      (sum, variant) => sum + Number(variant.stock || 0),
+      0
+    );
+
+    await prisma.produitVariante.createMany({
+      data: (product.variants || []).map((variant) => ({
+        organisationId: organisation.id,
+        produitId: createdProduct.id,
+        taille: variant.taille || "Unique",
+        couleur: variant.couleur || null,
+        codeBarres: variant.codeBarres || null,
+        prixAchat: product.prixAchat,
+        prixVente: product.prixDetail,
+        quantiteStock: Number(variant.stock || 0),
+        seuilMinimum: product.seuilMinimum,
+        actif: true,
+      })),
+    });
+
+    await prisma.stock.create({
+      data: {
+        organisationId: organisation.id,
+        produitId: createdProduct.id,
+        pointDeVenteId: store.id,
+        quantite: totalVariantStock,
+      },
+    });
+  }
+
+  return {
+    organisation,
+    admin,
+    cashier,
+  };
+}
+
+async function createGlobalSuperAdmin(passwordHash) {
+  const organisation = await prisma.organisation.create({
+    data: {
+      name: GLOBAL_ORGANISATION_NAME,
+    },
+  });
+
+  const superAdmin = await prisma.utilisateur.create({
+    data: {
+      organisationId: organisation.id,
+      nom: "Super Admin SportZone",
+      email: SUPER_ADMIN_EMAIL,
+      motDePasse: passwordHash,
+      role: "SUPER_ADMIN",
+      estActif: true,
+      approvalStatus: "APPROVED",
+    },
+  });
+
+  return {
+    organisation,
+    superAdmin,
+  };
 }
 
 async function main() {
-  console.log("Starting single-organisation seed...");
+  console.log("Resetting copied Comdis data for SportZone multi-tenant...");
+  await resetCopiedProjectData();
 
-  await cleanupLegacyManagerData();
-  await seedMainOrganisation(mainOrganisationConfig);
+  const [superAdminPassword, adminPassword, cashierPassword] = await Promise.all([
+    bcrypt.hash("SuperAdmin12345", 10),
+    bcrypt.hash("Admin12345", 10),
+    bcrypt.hash("Caisse12345", 10),
+  ]);
 
-  console.log("Seed completed successfully.");
-  console.log("Admin: admin@comdis.local / Admin12345");
-  console.log(
-    "Employes: caisse1@comdis.local, caisse2@comdis.local, caisse3@comdis.local, caisse4@comdis.local, caisse5@comdis.local, caisse6@comdis.local"
-  );
+  const globalSeed = await createGlobalSuperAdmin(superAdminPassword);
+  const passwordHashes = {
+    admin: adminPassword,
+    cashier: cashierPassword,
+  };
+
+  const seededOrganisations = [];
+
+  for (const organisationConfig of organisationSeeds) {
+    const seededOrganisation = await createOrganisationSeed(
+      organisationConfig,
+      passwordHashes
+    );
+    seededOrganisations.push(seededOrganisation);
+  }
+
+  console.log("SportZone multi-tenant seed completed.");
+  console.log("Organisation globale:");
+  console.log(`  Super admin: ${SUPER_ADMIN_EMAIL} / SuperAdmin12345`);
+  console.log("Organisation Rabat:");
+  console.log("  Admin: admin-rabat@sportzone.local / Admin12345");
+  console.log("  Caissier: caissier-rabat@sportzone.local / Caisse12345");
+  console.log("Organisation Casa:");
+  console.log("  Admin: admin-casa@sportzone.local / Admin12345");
+  console.log("  Caissier: caissier-casa@sportzone.local / Caisse12345");
+  console.log(`Organisation globale creee: ${globalSeed.organisation.name}`);
+  console.log(`Organisations creees: ${seededOrganisations.length}`);
 }
 
 main()

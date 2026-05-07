@@ -28,6 +28,15 @@ const createInitialEditModal = () => ({
   user: null,
 });
 
+const createInitialPasswordModal = () => ({
+  isOpen: false,
+  user: null,
+});
+
+const createInitialPasswordFormData = () => ({
+  newPassword: "",
+});
+
 const getCollection = (payload, keys = []) => {
   if (Array.isArray(payload)) {
     return payload;
@@ -43,10 +52,6 @@ const getCollection = (payload, keys = []) => {
 };
 
 const getUsersCollection = (payload) => getCollection(payload, ["data", "users"]);
-const getStoresCollection = (payload) => getCollection(payload, ["data", "stores"]);
-const getCashRegistersCollection = (payload) =>
-  getCollection(payload, ["data", "cashRegisters"]);
-
 const getUserWriteUrl = () =>
   api.defaults.baseURL?.replace(/\/api\/?$/, "/users") || "/users";
 
@@ -69,8 +74,6 @@ const buildUserCreatePayload = (formData) => ({
 function UsersPage() {
   const [searchTerm, setSearchTerm] = useState("");
   const [users, setUsers] = useState([]);
-  const [stores, setStores] = useState([]);
-  const [cashRegisters, setCashRegisters] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState("");
   const [notice, setNotice] = useState({ type: "", message: "" });
@@ -81,33 +84,15 @@ function UsersPage() {
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [addFormData, setAddFormData] = useState(createInitialAddFormData);
   const [addModalError, setAddModalError] = useState("");
-  const [storesError, setStoresError] = useState("");
-  const [cashRegistersError, setCashRegistersError] = useState("");
   const [isSubmittingAdd, setIsSubmittingAdd] = useState(false);
-  const [isLoadingStores, setIsLoadingStores] = useState(false);
-  const [isLoadingCashRegisters, setIsLoadingCashRegisters] = useState(false);
+  const [passwordModal, setPasswordModal] = useState(createInitialPasswordModal);
+  const [passwordFormData, setPasswordFormData] = useState(createInitialPasswordFormData);
+  const [passwordModalError, setPasswordModalError] = useState("");
+  const [isSubmittingPassword, setIsSubmittingPassword] = useState(false);
 
   const fetchUsers = async () => {
     const response = await api.get("/users");
     setUsers(getUsersCollection(response.data));
-  };
-
-  const fetchStores = async () => {
-    const response = await api.get("/stores");
-    const list = getStoresCollection(response.data);
-    setStores(list);
-    setStoresError("");
-    return list;
-  };
-
-  const fetchCashRegisters = async (storeId) => {
-    const response = await api.get("/cash-registers", {
-      params: { storeId },
-    });
-    const list = getCashRegistersCollection(response.data);
-    setCashRegisters(list);
-    setCashRegistersError("");
-    return list;
   };
 
   useEffect(() => {
@@ -145,65 +130,6 @@ function UsersPage() {
     };
   }, []);
 
-  useEffect(() => {
-    if (!isAddModalOpen || addFormData.role !== "employe") {
-      setCashRegisters([]);
-      setCashRegistersError("");
-      return;
-    }
-
-    if (!addFormData.pointDeVenteId) {
-      setCashRegisters([]);
-      setCashRegistersError("");
-      setAddFormData((current) =>
-        current.caisseId ? { ...current, caisseId: "" } : current
-      );
-      return;
-    }
-
-    let isMounted = true;
-
-    async function loadCashRegisters() {
-      try {
-        setIsLoadingCashRegisters(true);
-        setCashRegistersError("");
-
-        const list = await fetchCashRegisters(Number(addFormData.pointDeVenteId));
-
-        if (!isMounted) {
-          return;
-        }
-
-        setAddFormData((current) => ({
-          ...current,
-          caisseId: list.some(
-            (cashRegister) => String(cashRegister.id) === String(current.caisseId)
-          )
-            ? current.caisseId
-            : "",
-        }));
-      } catch (error) {
-        if (isMounted) {
-          setCashRegisters([]);
-          setCashRegistersError(
-            error.response?.data?.message ||
-              "Impossible de charger les caisses pour ce magasin."
-          );
-        }
-      } finally {
-        if (isMounted) {
-          setIsLoadingCashRegisters(false);
-        }
-      }
-    }
-
-    loadCashRegisters();
-
-    return () => {
-      isMounted = false;
-    };
-  }, [isAddModalOpen, addFormData.pointDeVenteId, addFormData.role]);
-
   const filteredUsers = useMemo(
     () =>
       users.filter((user) => {
@@ -213,12 +139,9 @@ function UsersPage() {
           return true;
         }
 
-        const storeName = user.storeName || user.store?.name || "";
-
         return (
           user.name?.toLowerCase().includes(query) ||
-          user.email?.toLowerCase().includes(query) ||
-          storeName.toLowerCase().includes(query)
+          user.email?.toLowerCase().includes(query)
         );
       }),
     [searchTerm, users]
@@ -253,28 +176,8 @@ function UsersPage() {
   const openAddModal = async () => {
     setNotice({ type: "", message: "" });
     setAddModalError("");
-    setStoresError("");
-    setCashRegistersError("");
-    setCashRegisters([]);
     setAddFormData(createInitialAddFormData());
     setIsAddModalOpen(true);
-
-    if (stores.length) {
-      return;
-    }
-
-    try {
-      setIsLoadingStores(true);
-      await fetchStores();
-    } catch (error) {
-      setStores([]);
-      setStoresError(
-        error.response?.data?.message ||
-          "Impossible de charger les magasins pour le moment."
-      );
-    } finally {
-      setIsLoadingStores(false);
-    }
   };
 
   const closeAddModal = () => {
@@ -285,18 +188,38 @@ function UsersPage() {
     setIsAddModalOpen(false);
     setAddFormData(createInitialAddFormData());
     setAddModalError("");
-    setStoresError("");
-    setCashRegistersError("");
-    setCashRegisters([]);
   };
 
   const resetAddModal = () => {
     setIsAddModalOpen(false);
     setAddFormData(createInitialAddFormData());
     setAddModalError("");
-    setStoresError("");
-    setCashRegistersError("");
-    setCashRegisters([]);
+  };
+
+  const openPasswordModal = (user) => {
+    setNotice({ type: "", message: "" });
+    setPasswordModalError("");
+    setPasswordFormData(createInitialPasswordFormData());
+    setPasswordModal({
+      isOpen: true,
+      user,
+    });
+  };
+
+  const closePasswordModal = () => {
+    if (isSubmittingPassword) {
+      return;
+    }
+
+    setPasswordModal(createInitialPasswordModal());
+    setPasswordFormData(createInitialPasswordFormData());
+    setPasswordModalError("");
+  };
+
+  const resetPasswordModal = () => {
+    setPasswordModal(createInitialPasswordModal());
+    setPasswordFormData(createInitialPasswordFormData());
+    setPasswordModalError("");
   };
 
   const handleEditFormChange = (event) => {
@@ -321,17 +244,18 @@ function UsersPage() {
         [name]: nextValue,
       };
 
-      if (name === "role" && value === "admin") {
-        nextState.pointDeVenteId = "";
-        nextState.caisseId = "";
-      }
-
-      if (name === "pointDeVenteId" && value !== current.pointDeVenteId) {
-        nextState.caisseId = "";
-      }
-
       return nextState;
     });
+  };
+
+  const handlePasswordFormChange = (event) => {
+    const { name, value } = event.target;
+
+    setPasswordModalError("");
+    setPasswordFormData((current) => ({
+      ...current,
+      [name]: value,
+    }));
   };
 
   const validateEditForm = () => {
@@ -367,12 +291,16 @@ function UsersPage() {
       return "Le role est obligatoire.";
     }
 
-    if (addFormData.role === "employe" && !addFormData.pointDeVenteId) {
-      return "Le magasin est obligatoire pour un employe.";
+    return "";
+  };
+
+  const validatePasswordForm = () => {
+    if (!passwordFormData.newPassword.trim()) {
+      return "Le nouveau mot de passe est obligatoire.";
     }
 
-    if (addFormData.role === "employe" && !addFormData.caisseId) {
-      return "La caisse est obligatoire pour un employe.";
+    if (passwordFormData.newPassword.trim().length < 8) {
+      return "Le nouveau mot de passe doit contenir au moins 8 caracteres.";
     }
 
     return "";
@@ -448,12 +376,50 @@ function UsersPage() {
     }
   };
 
+  const handleSubmitPassword = async (event) => {
+    event.preventDefault();
+
+    const validationMessage = validatePasswordForm();
+
+    if (validationMessage) {
+      setPasswordModalError(validationMessage);
+      return;
+    }
+
+    if (!passwordModal.user?.id) {
+      setPasswordModalError("Utilisateur introuvable.");
+      return;
+    }
+
+    try {
+      setIsSubmittingPassword(true);
+      setPasswordModalError("");
+
+      await api.patch(`${getUserWriteUrl()}/${passwordModal.user.id}/password`, {
+        newPassword: passwordFormData.newPassword.trim(),
+      });
+
+      resetPasswordModal();
+      setNotice({
+        type: "success",
+        message: "Mot de passe modifie avec succes.",
+      });
+    } catch (error) {
+      setPasswordModalError(
+        error.response?.data?.message ||
+          "Impossible de modifier le mot de passe pour le moment."
+      );
+    } finally {
+      setIsSubmittingPassword(false);
+    }
+  };
+
   return (
     <div>
       <PageHeader
         eyebrow="Utilisateurs"
         title="Gestion des utilisateurs"
-        description="Suivre les comptes admin et employe, avec leur magasin d'affectation et leur statut."
+        description="Suivre les comptes admin et caissier du magasin SportZone."
         actions={
           <button className="primary-button" type="button" onClick={openAddModal}>
             Ajouter utilisateur
@@ -467,7 +433,7 @@ function UsersPage() {
 
       <SectionCard
         title="Liste des utilisateurs"
-        description="Recherche par nom, email ou point de vente."
+        description="Recherche par nom ou email."
       >
         <div className="table-toolbar">
           <SearchInput
@@ -486,7 +452,6 @@ function UsersPage() {
             { key: "name", label: "Nom" },
             { key: "email", label: "Email" },
             { key: "role", label: "Role" },
-            { key: "store", label: "Magasin" },
             { key: "status", label: "Statut" },
             { key: "actions", label: "Actions" },
           ]}
@@ -517,10 +482,9 @@ function UsersPage() {
                 <td>{user.email}</td>
                 <td>
                   <Badge tone={user.role === "admin" ? "info" : "neutral"}>
-                    {user.role}
+                    {user.role === "admin" ? "admin" : "caissier"}
                   </Badge>
                 </td>
-                <td>{user.storeName || user.store?.name || "-"}</td>
                 <td>
                   <Badge tone={statusLabel === "Actif" ? "success" : "warning"}>
                     {statusLabel}
@@ -534,6 +498,13 @@ function UsersPage() {
                       onClick={() => openEditModal(user)}
                     >
                       Edit
+                    </button>
+                    <button
+                      className="table-action-button"
+                      type="button"
+                      onClick={() => openPasswordModal(user)}
+                    >
+                      Changer mot de passe
                     </button>
                     <button className="table-action-button danger" type="button">
                       Delete
@@ -550,7 +521,7 @@ function UsersPage() {
         isOpen={isAddModalOpen}
         eyebrow="Nouvel utilisateur"
         title="Ajouter un utilisateur"
-        description="Renseignez les informations du compte, le role et l'affectation si necessaire."
+        description="Renseignez les informations du compte. Le caissier sera rattache automatiquement au magasin SportZone et a la caisse 1."
         onClose={closeAddModal}
         actions={
           <>
@@ -576,11 +547,6 @@ function UsersPage() {
         <form className="form-grid" id="add-user-form" onSubmit={handleSubmitAdd}>
           {addModalError ? (
             <div className="inline-notice error">{addModalError}</div>
-          ) : null}
-
-          {storesError ? <div className="inline-notice error">{storesError}</div> : null}
-          {cashRegistersError ? (
-            <div className="inline-notice error">{cashRegistersError}</div>
           ) : null}
 
           <div className="field-group">
@@ -641,67 +607,7 @@ function UsersPage() {
               required
             >
               <option value="admin">admin</option>
-              <option value="employe">employe</option>
-            </select>
-          </div>
-
-          <div className="field-group">
-            <label className="field-label" htmlFor="add-user-store">
-              Magasin
-            </label>
-            <select
-              id="add-user-store"
-              className="text-input select-input"
-              name="pointDeVenteId"
-              value={addFormData.pointDeVenteId}
-              onChange={handleAddFormChange}
-              disabled={addFormData.role !== "employe" || isLoadingStores}
-            >
-              <option value="">
-                {addFormData.role === "admin"
-                  ? "Aucun magasin requis pour admin"
-                  : isLoadingStores
-                  ? "Chargement des magasins..."
-                  : "Selectionner un magasin"}
-              </option>
-              {stores.map((store) => (
-                <option key={store.id} value={store.id}>
-                  {store.name}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="field-group">
-            <label className="field-label" htmlFor="add-user-cash-register">
-              Caisse
-            </label>
-            <select
-              id="add-user-cash-register"
-              className="text-input select-input"
-              name="caisseId"
-              value={addFormData.caisseId}
-              onChange={handleAddFormChange}
-              disabled={
-                addFormData.role !== "employe" ||
-                !addFormData.pointDeVenteId ||
-                isLoadingCashRegisters
-              }
-            >
-              <option value="">
-                {addFormData.role === "admin"
-                  ? "Aucune caisse requise pour admin"
-                  : !addFormData.pointDeVenteId
-                  ? "Choisir d'abord un magasin"
-                  : isLoadingCashRegisters
-                  ? "Chargement des caisses..."
-                  : "Selectionner une caisse"}
-              </option>
-              {cashRegisters.map((cashRegister) => (
-                <option key={cashRegister.id} value={cashRegister.id}>
-                  {cashRegister.name}
-                </option>
-              ))}
+              <option value="employe">caissier</option>
             </select>
           </div>
 
@@ -793,8 +699,66 @@ function UsersPage() {
               required
             >
               <option value="admin">admin</option>
-              <option value="employe">employe</option>
+              <option value="employe">caissier</option>
             </select>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal
+        isOpen={passwordModal.isOpen}
+        eyebrow="Securite utilisateur"
+        title="Changer le mot de passe"
+        description={
+          passwordModal.user
+            ? `Definissez un nouveau mot de passe pour ${passwordModal.user.name}.`
+            : "Definissez un nouveau mot de passe."
+        }
+        onClose={closePasswordModal}
+        actions={
+          <>
+            <button
+              className="ghost-button"
+              type="button"
+              onClick={closePasswordModal}
+              disabled={isSubmittingPassword}
+            >
+              Annuler
+            </button>
+            <button
+              className="primary-button"
+              type="submit"
+              form="change-password-form"
+              disabled={isSubmittingPassword}
+            >
+              {isSubmittingPassword ? "Enregistrement..." : "Changer mot de passe"}
+            </button>
+          </>
+        }
+      >
+        <form
+          className="form-grid"
+          id="change-password-form"
+          onSubmit={handleSubmitPassword}
+        >
+          {passwordModalError ? (
+            <div className="inline-notice error">{passwordModalError}</div>
+          ) : null}
+
+          <div className="field-group">
+            <label className="field-label" htmlFor="change-user-password">
+              Nouveau mot de passe
+            </label>
+            <input
+              id="change-user-password"
+              className="text-input"
+              type="password"
+              name="newPassword"
+              value={passwordFormData.newPassword}
+              onChange={handlePasswordFormChange}
+              placeholder="Nouveau12345"
+              required
+            />
           </div>
         </form>
       </Modal>

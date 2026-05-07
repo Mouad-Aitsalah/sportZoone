@@ -6,8 +6,9 @@ import Modal from "../components/Modal";
 import PageHeader from "../components/PageHeader";
 import SearchInput from "../components/SearchInput";
 import SectionCard from "../components/SectionCard";
-import { getCurrentUser } from "../store/authStore";
-import { cleanupLegacyStoreCache, getStoresCollection } from "../utils/storeAccess";
+import { getCurrentUser, isAdminRole } from "../store/authStore";
+import { cleanupLegacyStoreCache } from "../utils/storeAccess";
+import { formatCurrencyDh } from "../utils/formatters";
 
 const createInitialModalState = () => ({
   isOpen: false,
@@ -23,11 +24,17 @@ const createInitialFormData = (mode = "entry", stock = null) => ({
   reason: mode === "correction" ? "Correction inventaire" : "Réapprovisionnement",
 });
 
+const STOCK_QUERY_PARAMS = {
+  params: {
+    page: 1,
+    limit: 500,
+  },
+};
+
 function StockPage() {
   const [searchTerm, setSearchTerm] = useState("");
-  const [selectedStore, setSelectedStore] = useState("Tous");
+  const [purchaseValueSort, setPurchaseValueSort] = useState("default");
   const [stocks, setStocks] = useState([]);
-  const [stores, setStores] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
@@ -36,12 +43,18 @@ function StockPage() {
   const [stockModal, setStockModal] = useState(createInitialModalState);
   const [formData, setFormData] = useState(createInitialFormData());
   const currentUser = getCurrentUser();
-  const canManageStock = currentUser?.role === "admin";
-
+  const canManageStock = isAdminRole(currentUser?.role);
+  const canViewFinancialStock = canManageStock;
   const fetchStocks = async () => {
-    const response = await api.get("/stocks");
+    const response = await api.get("/stocks", STOCK_QUERY_PARAMS);
     setStocks(Array.isArray(response.data) ? response.data : response.data?.data || []);
   };
+
+  useEffect(() => {
+    if (!canViewFinancialStock && purchaseValueSort !== "default") {
+      setPurchaseValueSort("default");
+    }
+  }, [canViewFinancialStock, purchaseValueSort]);
 
   useEffect(() => {
     let isMounted = true;
@@ -52,10 +65,7 @@ function StockPage() {
         setIsLoading(true);
         setErrorMessage("");
 
-        const [stocksResponse, storesResponse] = await Promise.all([
-          api.get("/stocks"),
-          api.get("/stores"),
-        ]);
+        const stocksResponse = await api.get("/stocks", STOCK_QUERY_PARAMS);
 
         if (isMounted) {
           setStocks(
@@ -63,11 +73,9 @@ function StockPage() {
               ? stocksResponse.data
               : stocksResponse.data?.data || []
           );
-          setStores(getStoresCollection(storesResponse.data));
         }
       } catch (error) {
         if (isMounted) {
-          setStores([]);
           setErrorMessage(
             error.response?.data?.message ||
               "Impossible de charger le stock pour le moment."
@@ -87,25 +95,46 @@ function StockPage() {
     };
   }, []);
 
-  const storeOptions = useMemo(
-    () => stores.filter((store) => store?.id && store?.name),
-    [stores]
-  );
-
   const filteredStocks = useMemo(
-    () =>
-      stocks.filter((item) => {
+    () => {
+      const filteredItems = stocks.filter((item) => {
         const query = searchTerm.trim().toLowerCase();
-        const matchesSearch =
+        return (
           !query ||
           item.productName?.toLowerCase().includes(query) ||
-          item.barcode?.toLowerCase().includes(query);
-        const matchesStore =
-          selectedStore === "Tous" || String(item.storeId) === String(selectedStore);
+          item.barcode?.toLowerCase().includes(query) ||
+          item.variantLabel?.toLowerCase().includes(query) ||
+          item.variantSize?.toLowerCase().includes(query) ||
+          item.variantColor?.toLowerCase().includes(query)
+        );
+      });
 
-        return matchesSearch && matchesStore;
-      }),
-    [stocks, searchTerm, selectedStore]
+      if (purchaseValueSort === "asc" || purchaseValueSort === "desc") {
+        filteredItems.sort((left, right) => {
+          const leftPurchaseValue =
+            Number(left.purchasePrice || 0) * Number(left.quantity || 0);
+          const rightPurchaseValue =
+            Number(right.purchasePrice || 0) * Number(right.quantity || 0);
+
+          return purchaseValueSort === "asc"
+            ? leftPurchaseValue - rightPurchaseValue
+            : rightPurchaseValue - leftPurchaseValue;
+        });
+      }
+
+      return filteredItems;
+    },
+    [stocks, searchTerm, purchaseValueSort]
+  );
+
+  const totalStockPurchaseValue = useMemo(
+    () =>
+      filteredStocks.reduce((sum, item) => {
+        const purchasePrice = Number(item.purchasePrice || 0);
+        const quantity = Number(item.quantity || 0);
+        return sum + purchasePrice * quantity;
+      }, 0),
+    [filteredStocks]
   );
 
   const openStockModal = (mode, stock) => {
@@ -156,14 +185,14 @@ function StockPage() {
 
     if (
       stockModal.mode === "entry" &&
-      (!Number.isFinite(quantity) || quantity <= 0 || !Number.isInteger(quantity))
+      (!Number.isFinite(quantity) || quantity <= 0)
     ) {
       return "La quantité à ajouter doit être un entier supérieur à 0.";
     }
 
     if (
       stockModal.mode === "correction" &&
-      (!Number.isFinite(quantity) || quantity < 0 || !Number.isInteger(quantity))
+      (!Number.isFinite(quantity) || quantity < 0)
     ) {
       return "La nouvelle quantité doit être un entier supérieur ou égal à 0.";
     }
@@ -192,6 +221,7 @@ function StockPage() {
 
     const payload = {
       productId: stockModal.stock.productId,
+      variantId: stockModal.stock.variantId,
       storeId: stockModal.stock.storeId,
       quantity: Number(formData.quantity),
       reason: formData.reason.trim(),
@@ -244,8 +274,8 @@ function StockPage() {
     <div>
       <PageHeader
         eyebrow="Stock"
-        title="Gestion du stock"
-        description="Rechercher les niveaux de stock par magasin et identifier rapidement les seuils critiques."
+        title="Stock SportZone"
+        description="Afficher directement le stock du magasin SportZone et intervenir rapidement sur les seuils critiques."
       />
 
       {notice.message ? (
@@ -254,27 +284,32 @@ function StockPage() {
 
       <SectionCard
         title="Etat du stock"
-        description="Suivi des quantites, seuils minimums et actions de correction."
+        description="Suivi des quantites, seuils minimums et actions de correction du magasin SportZone."
       >
+        {canViewFinancialStock ? (
+          <div className="details-summary">
+            <span>Valeur totale du stock</span>
+            <strong>{formatCurrencyDh(totalStockPurchaseValue)}</strong>
+          </div>
+        ) : null}
+
         <div className="filter-row">
           <SearchInput
             value={searchTerm}
             onChange={setSearchTerm}
             placeholder="Rechercher par produit ou code-barres"
           />
-
-          <select
-            className="text-input select-input"
-            value={selectedStore}
-            onChange={(event) => setSelectedStore(event.target.value)}
-          >
-            <option value="Tous">Tous les magasins</option>
-            {storeOptions.map((store) => (
-              <option key={store.id} value={store.id}>
-                {store.name}
-              </option>
-            ))}
-          </select>
+          {canViewFinancialStock ? (
+            <select
+              className="text-input select-input"
+              value={purchaseValueSort}
+              onChange={(event) => setPurchaseValueSort(event.target.value)}
+            >
+              <option value="default">Aucun tri / defaut</option>
+              <option value="asc">Valeur achat croissante</option>
+              <option value="desc">Valeur achat decroissante</option>
+            </select>
+          ) : null}
         </div>
 
         {errorMessage ? (
@@ -282,21 +317,35 @@ function StockPage() {
         ) : null}
 
         <DataTable
-          columns={[
-            { key: "product", label: "Produit" },
-            { key: "barcode", label: "Code-barres" },
-            { key: "store", label: "Magasin" },
-            { key: "quantity", label: "Quantite" },
-            { key: "minimum", label: "Seuil mini" },
-            { key: "status", label: "Statut" },
-            { key: "actions", label: "Actions" },
-          ]}
+          columns={
+            canViewFinancialStock
+              ? [
+                  { key: "product", label: "Produit" },
+                  { key: "size", label: "Taille" },
+                  { key: "color", label: "Couleur" },
+                  { key: "barcode", label: "Code-barres" },
+                  { key: "quantity", label: "Quantite" },
+                  { key: "purchaseValue", label: "Valeur achat" },
+                  { key: "minimum", label: "Seuil mini" },
+                  { key: "status", label: "Statut" },
+                  { key: "actions", label: "Actions" },
+                ]
+              : [
+                  { key: "product", label: "Produit" },
+                  { key: "size", label: "Taille" },
+                  { key: "color", label: "Couleur" },
+                  { key: "barcode", label: "Code-barres" },
+                  { key: "quantity", label: "Quantite" },
+                  { key: "minimum", label: "Seuil mini" },
+                  { key: "status", label: "Statut" },
+                ]
+          }
           data={filteredStocks}
           emptyTitle={isLoading ? "Chargement du stock..." : "Aucun mouvement trouve"}
           emptyDescription={
             isLoading
               ? "Veuillez patienter pendant la recuperation des donnees."
-              : "Essayez un autre magasin ou une autre recherche."
+              : "Essayez une autre recherche."
           }
           renderRow={(item) => {
             const isCritical = item.severity === "critical";
@@ -317,9 +366,17 @@ function StockPage() {
                 <td>
                   <strong>{item.productName}</strong>
                 </td>
+                <td>{item.variantSize || "Unique"}</td>
+                <td>{item.variantColor || "-"}</td>
                 <td>{item.barcode}</td>
-                <td>{item.storeName}</td>
                 <td>{item.quantity}</td>
+                {canViewFinancialStock ? (
+                  <td>
+                    {formatCurrencyDh(
+                      Number(item.purchasePrice || 0) * Number(item.quantity || 0)
+                    )}
+                  </td>
+                ) : null}
                 <td>{item.minimumThreshold}</td>
                 <td>
                   <Badge
@@ -334,28 +391,30 @@ function StockPage() {
                     {stockStatus}
                   </Badge>
                 </td>
-                <td>
-                  {canManageStock ? (
-                    <div className="table-action-row">
-                      <button
-                        className="table-action-button"
-                        type="button"
-                        onClick={() => openStockModal("entry", item)}
-                      >
-                        Entree stock
-                      </button>
-                      <button
-                        className="table-action-button"
-                        type="button"
-                        onClick={() => openStockModal("correction", item)}
-                      >
-                        Correction stock
-                      </button>
-                    </div>
-                  ) : (
-                    <span className="muted-text">-</span>
-                  )}
-                </td>
+                {canViewFinancialStock ? (
+                  <td>
+                    {canManageStock ? (
+                      <div className="table-action-row">
+                        <button
+                          className="table-action-button"
+                          type="button"
+                          onClick={() => openStockModal("entry", item)}
+                        >
+                          Entree stock
+                        </button>
+                        <button
+                          className="table-action-button"
+                          type="button"
+                          onClick={() => openStockModal("correction", item)}
+                        >
+                          Correction stock
+                        </button>
+                      </div>
+                    ) : (
+                      <span className="muted-text">-</span>
+                    )}
+                  </td>
+                ) : null}
               </tr>
             );
           }}
@@ -400,6 +459,14 @@ function StockPage() {
               <strong>{stockModal.stock.barcode}</strong>
             </div>
             <div className="detail-stat">
+              <span>Taille</span>
+              <strong>{stockModal.stock.variantSize || "Unique"}</strong>
+            </div>
+            <div className="detail-stat">
+              <span>Couleur</span>
+              <strong>{stockModal.stock.variantColor || "-"}</strong>
+            </div>
+            <div className="detail-stat">
               <span>Magasin</span>
               <strong>{stockModal.stock.storeName}</strong>
             </div>
@@ -423,8 +490,8 @@ function StockPage() {
               id="stock-quantity"
               className="text-input"
               type="number"
-              min={stockModal.mode === "entry" ? "1" : "0"}
-              step="1"
+              min="0"
+              step="0.25"
               name="quantity"
               placeholder={quantityPlaceholder}
               value={formData.quantity}

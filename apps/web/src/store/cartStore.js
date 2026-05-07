@@ -1,6 +1,21 @@
 import { createContext, useContext, useReducer } from "react";
 
 const CartContext = createContext(null);
+const QUANTITY_STEP = 0.25;
+
+const roundToStep = (value, step = QUANTITY_STEP) => {
+  const numericValue = Number(value || 0);
+
+  if (!Number.isFinite(numericValue)) {
+    return 0;
+  }
+
+  return Number((Math.round(numericValue / step) * step).toFixed(2));
+};
+
+const roundCurrency = (value) => Number(Number(value || 0).toFixed(2));
+
+const normalizeQuantity = (value) => roundToStep(Math.max(0, Number(value || 0)));
 
 function cartReducer(state, action) {
   switch (action.type) {
@@ -12,7 +27,7 @@ function cartReducer(state, action) {
           ...state,
           items: state.items.map((item) =>
             item.id === action.payload.id
-              ? { ...item, quantity: item.quantity + 1 }
+              ? { ...item, quantity: normalizeQuantity(item.quantity + QUANTITY_STEP) }
               : item
           ),
         };
@@ -20,7 +35,7 @@ function cartReducer(state, action) {
 
       return {
         ...state,
-        items: [...state.items, { ...action.payload, quantity: 1 }],
+        items: [...state.items, { ...action.payload, quantity: QUANTITY_STEP }],
       };
     }
 
@@ -35,7 +50,7 @@ function cartReducer(state, action) {
         ...state,
         items: state.items.map((item) =>
           item.id === action.payload
-            ? { ...item, quantity: item.quantity + 1 }
+            ? { ...item, quantity: normalizeQuantity(item.quantity + QUANTITY_STEP) }
             : item
         ),
       };
@@ -46,10 +61,32 @@ function cartReducer(state, action) {
         items: state.items
           .map((item) =>
             item.id === action.payload
-              ? { ...item, quantity: item.quantity - 1 }
+              ? { ...item, quantity: normalizeQuantity(item.quantity - QUANTITY_STEP) }
               : item
           )
           .filter((item) => item.quantity > 0),
+      };
+
+    case "UPDATE_QUANTITY":
+      return {
+        ...state,
+        items: state.items
+          .map((item) =>
+            item.id === action.payload.id
+              ? { ...item, quantity: normalizeQuantity(action.payload.quantity) }
+              : item
+          )
+          .filter((item) => item.quantity > 0),
+      };
+
+    case "UPDATE_PRICE":
+      return {
+        ...state,
+        items: state.items.map((item) =>
+          item.id === action.payload.id
+            ? { ...item, price: roundCurrency(action.payload.price) }
+            : item
+        ),
       };
 
     case "CLEAR_CART":
@@ -71,11 +108,19 @@ export function CartProvider({ children }) {
       dispatch({ type: "INCREASE_QUANTITY", payload: id }),
     decreaseQuantity: (id) =>
       dispatch({ type: "DECREASE_QUANTITY", payload: id }),
+    updateQuantity: (id, quantity) =>
+      dispatch({ type: "UPDATE_QUANTITY", payload: { id, quantity } }),
+    updatePrice: (id, price) =>
+      dispatch({ type: "UPDATE_PRICE", payload: { id, price } }),
     clearCart: () => dispatch({ type: "CLEAR_CART" }),
-    totalItems: state.items.reduce((sum, item) => sum + item.quantity, 0),
-    totalAmount: state.items.reduce(
-      (sum, item) => sum + item.quantity * item.price,
-      0
+    totalItems: roundToStep(
+      state.items.reduce((sum, item) => sum + Number(item.quantity || 0), 0)
+    ),
+    totalAmount: roundCurrency(
+      state.items.reduce(
+        (sum, item) => sum + Number(item.quantity || 0) * Number(item.price || 0),
+        0
+      )
     ),
   };
 

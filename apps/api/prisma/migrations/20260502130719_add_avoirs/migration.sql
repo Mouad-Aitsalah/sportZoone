@@ -1,0 +1,30 @@
+-- DropForeignKey
+ALTER TABLE "Achat" DROP CONSTRAINT "Achat_fournisseurId_fkey";
+
+-- AlterTable
+ALTER TABLE "Achat" ALTER COLUMN "modeReglement" DROP DEFAULT,
+ALTER COLUMN "totalHT" DROP DEFAULT,
+ALTER COLUMN "totalTVA" DROP DEFAULT,
+ALTER COLUMN "updatedAt" DROP DEFAULT;
+
+-- AlterTable
+ALTER TABLE "AchatItem" ALTER COLUMN "tauxTVA" DROP DEFAULT,
+ALTER COLUMN "montantTVA" DROP DEFAULT,
+ALTER COLUMN "totalHT" DROP DEFAULT,
+ALTER COLUMN "totalTTC" DROP DEFAULT,
+ALTER COLUMN "prixDetail" DROP DEFAULT,
+ALTER COLUMN "prixGros" DROP DEFAULT,
+ALTER COLUMN "prixMiniGros" DROP DEFAULT,
+ALTER COLUMN "updatedAt" DROP DEFAULT;
+
+-- AlterTable
+ALTER TABLE "Avoir" ALTER COLUMN "updatedAt" DROP DEFAULT;
+
+-- AlterTable
+ALTER TABLE "AvoirLigne" ALTER COLUMN "updatedAt" DROP DEFAULT;
+
+-- AlterTable
+ALTER TABLE "CategorieProduit" ALTER COLUMN "updatedAt" DROP DEFAULT;
+
+-- AddForeignKey
+ALTER TABLE "Achat" ADD CONSTRAINT "Achat_fournisseurId_fkey" FOREIGN KEY ("fournisseurId") REFERENCES "Fournisseur"("id") ON DELETE SET NULL ON UPDATE CASCADE;

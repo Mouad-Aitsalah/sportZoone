@@ -1,12 +1,26 @@
 const express = require("express");
+const multer = require("multer");
 const apiController = require("../controllers/apiController");
+const compteController = require("../controllers/compteController");
+const productController = require("../controllers/productController");
+const productCategoryController = require("../controllers/productCategoryController");
 const exportController = require("../controllers/exportController");
+const purchaseController = require("../controllers/purchaseController");
+const avoirController = require("../controllers/avoirController");
+const cashSessionController = require("../controllers/cashSessionController");
+const organisationController = require("../controllers/organisationController");
 const authMiddleware = require("../middlewares/authMiddleware");
 const loginRateLimitMiddleware = require("../middlewares/loginRateLimitMiddleware");
 const roleMiddleware = require("../middlewares/roleMiddleware");
 const asyncHandler = require("../utils/asyncHandler");
 
 const router = express.Router();
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024,
+  },
+});
 
 router.post(
   "/auth/login",
@@ -21,7 +35,38 @@ router.get(
   roleMiddleware("ADMIN", "EMPLOYE"),
   asyncHandler(apiController.getProductByBarcode)
 );
+router.get(
+  "/products/:id/sales",
+  roleMiddleware("ADMIN", "EMPLOYE"),
+  asyncHandler(apiController.getProductSales)
+);
+router.post(
+  "/products/import",
+  roleMiddleware("ADMIN"),
+  upload.single("file"),
+  asyncHandler(productController.importProducts)
+);
 router.get("/products", roleMiddleware("ADMIN", "EMPLOYE"), asyncHandler(apiController.getProducts));
+router.get(
+  "/organisations",
+  roleMiddleware("SUPER_ADMIN", "ADMIN_GLOBAL"),
+  asyncHandler(organisationController.getOrganisations)
+);
+router.post(
+  "/organisations",
+  roleMiddleware("SUPER_ADMIN", "ADMIN_GLOBAL"),
+  asyncHandler(organisationController.createOrganisation)
+);
+router.put(
+  "/organisations/:id",
+  roleMiddleware("SUPER_ADMIN", "ADMIN_GLOBAL"),
+  asyncHandler(organisationController.updateOrganisation)
+);
+router.delete(
+  "/organisations/:id",
+  roleMiddleware("SUPER_ADMIN", "ADMIN_GLOBAL"),
+  asyncHandler(organisationController.deleteOrganisation)
+);
 
 router.get("/stocks", roleMiddleware("ADMIN", "EMPLOYE"), asyncHandler(apiController.getStocks));
 router.get(
@@ -38,6 +83,41 @@ router.post(
 
 router.post("/sales", roleMiddleware("ADMIN", "EMPLOYE"), asyncHandler(apiController.createSale));
 router.get("/sales", roleMiddleware("ADMIN", "EMPLOYE"), asyncHandler(apiController.getSales));
+router.patch(
+  "/sales/:id/payment",
+  roleMiddleware("ADMIN", "EMPLOYE"),
+  asyncHandler(apiController.addSalePayment)
+);
+router.post(
+  "/refunds",
+  roleMiddleware("ADMIN", "EMPLOYE"),
+  asyncHandler(apiController.createRefund)
+);
+router.get(
+  "/cash-sessions/current",
+  roleMiddleware("ADMIN", "EMPLOYE"),
+  asyncHandler(cashSessionController.getCurrentCashSession)
+);
+router.patch(
+  "/cash-sessions/current/close",
+  roleMiddleware("ADMIN", "EMPLOYE"),
+  asyncHandler(cashSessionController.closeCurrentCashSession)
+);
+router.get(
+  "/cash-sessions",
+  roleMiddleware("ADMIN"),
+  asyncHandler(cashSessionController.getCashSessions)
+);
+router.get(
+  "/cash-sessions/:id",
+  roleMiddleware("ADMIN"),
+  asyncHandler(cashSessionController.getCashSessionById)
+);
+router.post(
+  "/cash-sessions/:id/close",
+  roleMiddleware("ADMIN", "EMPLOYE"),
+  asyncHandler(cashSessionController.closeCashSession)
+);
 router.post(
   "/sales/:id/cancel",
   roleMiddleware("ADMIN"),
@@ -57,6 +137,11 @@ router.get(
   "/exports/sales/pdf",
   roleMiddleware("ADMIN", "EMPLOYE"),
   asyncHandler(exportController.exportSalesPdf)
+);
+router.post(
+  "/exports/products/barcodes/pdf",
+  roleMiddleware("ADMIN"),
+  asyncHandler(exportController.exportProductBarcodesPdf)
 );
 router.get(
   "/exports/reports/excel",
@@ -80,6 +165,127 @@ router.get(
 );
 
 router.get("/suppliers", roleMiddleware("ADMIN"), asyncHandler(apiController.getSuppliers));
+router.get(
+  "/product-categories",
+  roleMiddleware("ADMIN", "EMPLOYE"),
+  asyncHandler(productCategoryController.getProductCategories)
+);
+router.post(
+  "/product-categories",
+  roleMiddleware("ADMIN"),
+  asyncHandler(productCategoryController.createProductCategory)
+);
+router.put(
+  "/product-categories/:id",
+  roleMiddleware("ADMIN"),
+  asyncHandler(productCategoryController.updateProductCategory)
+);
+router.delete(
+  "/product-categories/:id",
+  roleMiddleware("ADMIN"),
+  asyncHandler(productCategoryController.deleteProductCategory)
+);
+router.get(
+  "/comptes",
+  roleMiddleware("ADMIN", "EMPLOYE"),
+  asyncHandler(compteController.getComptes)
+);
+router.get(
+  "/comptes/:id/open-invoices",
+  roleMiddleware("ADMIN", "EMPLOYE"),
+  asyncHandler(compteController.getCustomerOpenInvoices)
+);
+router.get(
+  "/comptes/:id",
+  roleMiddleware("ADMIN", "EMPLOYE"),
+  asyncHandler(compteController.getCompteById)
+);
+router.post("/comptes", roleMiddleware("ADMIN"), asyncHandler(compteController.createCompte));
+router.put(
+  "/comptes/:id",
+  roleMiddleware("ADMIN"),
+  asyncHandler(compteController.updateCompte)
+);
+router.delete(
+  "/comptes/:id",
+  roleMiddleware("ADMIN"),
+  asyncHandler(compteController.deleteCompte)
+);
+router.post(
+  "/purchases",
+  roleMiddleware("ADMIN", "EMPLOYE"),
+  asyncHandler(purchaseController.createPurchase)
+);
+router.get(
+  "/purchases",
+  roleMiddleware("ADMIN", "EMPLOYE"),
+  asyncHandler(purchaseController.getPurchases)
+);
+router.get(
+  "/purchases/:id",
+  roleMiddleware("ADMIN", "EMPLOYE"),
+  asyncHandler(purchaseController.getPurchaseById)
+);
+router.put(
+  "/purchases/:id",
+  roleMiddleware("ADMIN"),
+  asyncHandler(purchaseController.updatePurchase)
+);
+router.delete(
+  "/purchases/:id",
+  roleMiddleware("ADMIN"),
+  asyncHandler(purchaseController.deletePurchase)
+);
+router.post(
+  "/avoirs",
+  roleMiddleware("ADMIN", "EMPLOYE"),
+  asyncHandler(avoirController.createAvoir)
+);
+router.get(
+  "/avoirs",
+  roleMiddleware("ADMIN", "EMPLOYE"),
+  asyncHandler(avoirController.getAvoirs)
+);
+router.get(
+  "/avoirs/fournisseurs",
+  roleMiddleware("ADMIN", "EMPLOYE"),
+  asyncHandler(avoirController.getSupplierAvoirs)
+);
+router.post(
+  "/avoirs/fournisseurs",
+  roleMiddleware("ADMIN", "EMPLOYE"),
+  asyncHandler(avoirController.createSupplierAvoir)
+);
+router.get(
+  "/avoirs/fournisseurs/:id",
+  roleMiddleware("ADMIN", "EMPLOYE"),
+  asyncHandler(avoirController.getSupplierAvoirById)
+);
+router.patch(
+  "/avoirs/fournisseurs/:id/valider",
+  roleMiddleware("ADMIN", "EMPLOYE"),
+  asyncHandler(avoirController.validateSupplierAvoir)
+);
+router.patch(
+  "/avoirs/fournisseurs/:id/annuler",
+  roleMiddleware("ADMIN", "EMPLOYE"),
+  asyncHandler(avoirController.cancelSupplierAvoir)
+);
+router.get(
+  "/avoirs/:id",
+  roleMiddleware("ADMIN", "EMPLOYE"),
+  asyncHandler(avoirController.getAvoirById)
+);
+router.put(
+  "/avoirs/:id",
+  roleMiddleware("ADMIN", "EMPLOYE"),
+  asyncHandler(avoirController.updateAvoir)
+);
+router.delete(
+  "/avoirs/:id",
+  roleMiddleware("ADMIN", "EMPLOYE"),
+  asyncHandler(avoirController.deleteAvoir)
+);
 router.get(
   "/customers",
   roleMiddleware("ADMIN", "EMPLOYE"),

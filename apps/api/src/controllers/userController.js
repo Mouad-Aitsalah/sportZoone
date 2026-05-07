@@ -5,6 +5,7 @@ const { getOrganisationIdFromUser } = require("../utils/organisationScope");
 const {
   userCreateSchema,
   userUpdateSchema,
+  userPasswordUpdateSchema,
 } = require("../utils/validationSchemas");
 
 const parseId = (value) => {
@@ -41,6 +42,38 @@ const parseOptionalBoolean = (value, defaultValue = undefined) => {
   return null;
 };
 
+const getSingleStoreContext = async (organisationId, db = prisma) => {
+  const pointDeVente = await db.pointDeVente.findFirst({
+    where: {
+      organisationId,
+    },
+    select: {
+      id: true,
+    },
+    orderBy: [{ id: "asc" }],
+  });
+
+  const caisse = pointDeVente
+    ? await db.caisse.findFirst({
+        where: {
+          organisationId,
+          pointDeVenteId: pointDeVente.id,
+        },
+        select: {
+          id: true,
+          pointDeVenteId: true,
+          estActive: true,
+        },
+        orderBy: [{ id: "asc" }],
+      })
+    : null;
+
+  return {
+    pointDeVente,
+    caisse,
+  };
+};
+
 const userSelect = {
   id: true,
   nom: true,
@@ -71,7 +104,17 @@ const userSelect = {
   },
 };
 
-const mapRoleForApi = (role) => (role === "ADMIN" ? "admin" : "employe");
+const mapRoleForApi = (role) => {
+  if (role === "SUPER_ADMIN") {
+    return "super_admin";
+  }
+
+  if (role === "ADMIN_GLOBAL") {
+    return "admin_global";
+  }
+
+  return role === "ADMIN" ? "admin" : "employe";
+};
 
 const formatUser = (user) => ({
   id: user.id,
@@ -164,8 +207,8 @@ const createUser = async (req, res) => {
     const rawPassword = String(motDePasse || "");
     const normalizedRole = role || "EMPLOYE";
     const parsedEstActif = parseOptionalBoolean(estActif, true);
-    const parsedPointDeVenteId = parseOptionalInteger(pointDeVenteId);
-    const parsedCaisseId = parseOptionalInteger(caisseId);
+    let parsedPointDeVenteId = parseOptionalInteger(pointDeVenteId);
+    let parsedCaisseId = parseOptionalInteger(caisseId);
 
     if (!normalizedNom || !normalizedEmail || !rawPassword.trim()) {
       return res.status(400).json({
@@ -197,15 +240,22 @@ const createUser = async (req, res) => {
       });
     }
 
+    if (normalizedRole === "EMPLOYE" && (!parsedPointDeVenteId || !parsedCaisseId)) {
+      const singleStoreContext = await getSingleStoreContext(organisationId);
+
+      parsedPointDeVenteId = parsedPointDeVenteId || singleStoreContext.pointDeVente?.id || null;
+      parsedCaisseId = parsedCaisseId || singleStoreContext.caisse?.id || null;
+    }
+
     if (normalizedRole === "EMPLOYE" && !parsedPointDeVenteId) {
       return res.status(400).json({
-        message: "Un employe doit etre rattache a un point de vente.",
+        message: "Aucun magasin par defaut n'est disponible pour rattacher ce caissier.",
       });
     }
 
     if (normalizedRole === "EMPLOYE" && !parsedCaisseId) {
       return res.status(400).json({
-        message: "Un employe doit etre rattache a une caisse.",
+        message: "Aucune caisse par defaut n'est disponible pour rattacher ce caissier.",
       });
     }
 
@@ -427,15 +477,22 @@ const updateUser = async (req, res) => {
       finalCaisseId = parsedCaisseId;
     }
 
+    if (nextRole === "EMPLOYE" && (!finalPointDeVenteId || !finalCaisseId)) {
+      const singleStoreContext = await getSingleStoreContext(organisationId);
+
+      finalPointDeVenteId = finalPointDeVenteId || singleStoreContext.pointDeVente?.id || null;
+      finalCaisseId = finalCaisseId || singleStoreContext.caisse?.id || null;
+    }
+
     if (nextRole === "EMPLOYE" && !finalPointDeVenteId) {
       return res.status(400).json({
-        message: "Un employe doit etre rattache a un point de vente.",
+        message: "Aucun magasin par defaut n'est disponible pour rattacher ce caissier.",
       });
     }
 
     if (nextRole === "EMPLOYE" && !finalCaisseId) {
       return res.status(400).json({
-        message: "Un employe doit etre rattache a une caisse.",
+        message: "Aucune caisse par defaut n'est disponible pour rattacher ce caissier.",
       });
     }
 
@@ -565,10 +622,74 @@ const deleteUser = async (req, res) => {
   }
 };
 
+const changeUserPassword = async (req, res) => {
+  try {
+    const organisationId = getOrganisationIdFromUser(req.user);
+    const userId = parseId(req.params.id);
+
+    if (!userId) {
+      return res.status(400).json({
+        message: "ID utilisateur invalide.",
+      });
+    }
+
+    const existingUser = await prisma.utilisateur.findFirst({
+      where: {
+        organisationId,
+        id: userId,
+      },
+      select: {
+        id: true,
+        nom: true,
+      },
+    });
+
+    if (!existingUser) {
+      return res.status(404).json({
+        message: "Utilisateur introuvable.",
+      });
+    }
+
+    const { newPassword } = validateSchema(userPasswordUpdateSchema, req.body);
+    const normalizedPassword = String(newPassword || "").trim();
+
+    if (normalizedPassword.length < 8) {
+      return res.status(400).json({
+        message: "Le nouveau mot de passe doit contenir au moins 8 caracteres.",
+      });
+    }
+
+    const hashedPassword = await bcrypt.hash(normalizedPassword, 10);
+
+    await prisma.utilisateur.update({
+      where: { id: userId },
+      data: {
+        motDePasse: hashedPassword,
+      },
+    });
+
+    return res.status(200).json({
+      message: `Mot de passe mis a jour pour ${existingUser.nom}.`,
+    });
+  } catch (error) {
+    if (error?.status) {
+      return res.status(error.status).json({
+        message: error.message,
+      });
+    }
+
+    console.error("Change user password error:", error);
+    return res.status(500).json({
+      message: "Erreur serveur lors du changement de mot de passe.",
+    });
+  }
+};
+
 module.exports = {
   getAllUsers,
   getUserById,
   createUser,
   updateUser,
+  changeUserPassword,
   deleteUser,
 };

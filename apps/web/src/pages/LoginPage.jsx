@@ -1,8 +1,17 @@
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import sportZoneLogo from "../assets/sportzone-logo.jpeg";
 import api from "../services/api";
 import { ROUTE_PATHS } from "../routes/paths";
 import { getCurrentUser, isAuthenticated, saveAuthSession } from "../store/authStore";
+
+const resolveNextPath = (role, redirectPath) => {
+  if (role === "super_admin" || role === "admin_global") {
+    return ROUTE_PATHS.ORGANISATIONS;
+  }
+
+  return role === "admin" ? redirectPath : ROUTE_PATHS.POS;
+};
 
 function LoginPage() {
   const navigate = useNavigate();
@@ -18,8 +27,7 @@ function LoginPage() {
   useEffect(() => {
     if (isAuthenticated()) {
       const currentUser = getCurrentUser();
-      const nextPath =
-        currentUser?.role === "admin" ? redirectPath : ROUTE_PATHS.POS;
+      const nextPath = resolveNextPath(currentUser?.role, redirectPath);
       navigate(nextPath, { replace: true });
     }
   }, [navigate, redirectPath]);
@@ -45,8 +53,7 @@ function LoginPage() {
         password: formData.password,
       });
       const { token, user } = response.data;
-      const nextPath =
-        user?.role === "admin" ? redirectPath : ROUTE_PATHS.POS;
+      const nextPath = resolveNextPath(user?.role, redirectPath);
 
       saveAuthSession(token, user);
       navigate(nextPath, { replace: true });
@@ -56,9 +63,7 @@ function LoginPage() {
           "Votre demande d'accès a été envoyée. Attendez la validation de l'administrateur."
         );
       } else {
-        setErrorMessage(
-          "Invalid email or password"
-        );
+        setErrorMessage("Email ou mot de passe incorrect.");
       }
     } finally {
       setIsLoading(false);
@@ -69,17 +74,19 @@ function LoginPage() {
     <div className="login-page">
       <div className="login-shell">
         <section className="login-showcase">
-          <span className="brand-badge">Retail Command Center</span>
-          <h1 className="login-title">Run every point of sale from one clean workspace.</h1>
+          <span className="brand-badge">Sport Store POS</span>
+          <h1 className="login-title">
+            Pilotez SportZone depuis une interface caisse simple et rapide.
+          </h1>
           <p className="login-subtitle">
-            Monitor revenue, manage products, and process checkout activity for
-            all stores with a professional back-office experience.
+            Suivez les ventes, gerez les produits de sport et encaissez pour
+            chaque organisation SportZone depuis une experience back-office claire.
           </p>
 
           <div className="login-highlight-grid">
             <div className="highlight-card">
-              <strong>4 Stores</strong>
-              <span>Live synchronized operations</span>
+              <strong>2 Organisations</strong>
+              <span>Rabat et Casa en activite</span>
             </div>
             <div className="highlight-card">
               <strong>24/7 Access</strong>
@@ -87,20 +94,32 @@ function LoginPage() {
             </div>
             <div className="highlight-card">
               <strong>Stock Control</strong>
-              <span>Unified product visibility</span>
+              <span>Stock SportZone en direct</span>
             </div>
             <div className="highlight-card">
               <strong>Fast Checkout</strong>
-              <span>Barcode-based cashier workflow</span>
+              <span>Flux caisse avec code-barres</span>
             </div>
           </div>
         </section>
 
         <div className="login-card">
-          <p className="login-card-eyebrow">Welcome back</p>
-          <h2 className="login-form-title">Sign in</h2>
+          <img
+            className="login-logo"
+            src={sportZoneLogo}
+            alt="SportZone"
+            style={{
+              display: "block",
+              width: "90px",
+              maxWidth: "100%",
+              height: "auto",
+              margin: "0 auto 18px",
+            }}
+          />
+          <p className="login-card-eyebrow">SportZone</p>
+          <h2 className="login-form-title">Connexion</h2>
           <p className="helper-text">
-            Sign in with your backend account to access the dashboard.
+            Connectez-vous avec votre compte pour acceder au dashboard.
           </p>
 
           {errorMessage ? (
@@ -117,7 +136,7 @@ function LoginPage() {
                 className="text-input"
                 type="email"
                 name="email"
-                placeholder="admin@comdis.local"
+                placeholder="admin@sportzone.local"
                 value={formData.email}
                 onChange={handleChange}
                 required
@@ -126,14 +145,14 @@ function LoginPage() {
 
             <div className="field-group">
               <label className="field-label" htmlFor="password">
-                Password
+                Mot de passe
               </label>
               <input
                 id="password"
                 className="text-input"
                 type="password"
                 name="password"
-                placeholder="Enter your password"
+                placeholder="Saisir votre mot de passe"
                 value={formData.password}
                 onChange={handleChange}
                 required
@@ -145,13 +164,13 @@ function LoginPage() {
               type="submit"
               disabled={isLoading}
             >
-              {isLoading ? "Signing in..." : "Login to dashboard"}
+              {isLoading ? "Connexion..." : "Acceder au dashboard"}
             </button>
           </form>
 
           <div className="login-footer-note">
-            <span>Admin demo:</span>
-            <strong>admin@comdis.local</strong>
+            <span>Super admin demo:</span>
+            <strong>superadmin@sportzone.local</strong>
           </div>
         </div>
       </div>

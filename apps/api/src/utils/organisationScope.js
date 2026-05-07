@@ -15,6 +15,15 @@ const withOrganisation = (user, where = {}) => ({
   organisationId: getOrganisationIdFromUser(user),
 });
 
+const scopeByOrganisation = (reqOrUser, extraWhere = {}) => {
+  const user = reqOrUser?.user || reqOrUser;
+
+  return {
+    ...extraWhere,
+    organisationId: getOrganisationIdFromUser(user),
+  };
+};
+
 const ensureSameOrganisation = (record, user, label = "Ressource") => {
   if (!record) {
     return;
@@ -64,6 +73,7 @@ const ensureEmployeeCashRegisterAccess = (user, caisseId) => {
 module.exports = {
   getOrganisationIdFromUser,
   withOrganisation,
+  scopeByOrganisation,
   ensureSameOrganisation,
   ensureEmployeeStoreAccess,
   ensureEmployeeCashRegisterAccess,

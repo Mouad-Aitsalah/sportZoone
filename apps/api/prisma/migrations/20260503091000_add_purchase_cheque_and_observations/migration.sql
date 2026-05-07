@@ -1,0 +1,3 @@
+ALTER TABLE "Achat"
+ADD COLUMN IF NOT EXISTS "numeroCheque" TEXT,
+ADD COLUMN IF NOT EXISTS "observations" TEXT;

@@ -1,7 +1,7 @@
 const { Prisma } = require("@prisma/client");
-const { randomBytes } = require("crypto");
 const prisma = require("../config/prisma");
 const { getOrganisationIdFromUser } = require("../utils/organisationScope");
+const { buildAnnualDocumentNumber } = require("../services/annualSequenceService");
 
 const parseId = (value) => {
   const parsedValue = Number(value);
@@ -38,6 +38,36 @@ const createHttpError = (status, message) => {
   const error = new Error(message);
   error.status = status;
   return error;
+};
+
+const getSingleStoreContext = async (organisationId, db = prisma) => {
+  const pointDeVente = await db.pointDeVente.findFirst({
+    where: {
+      organisationId,
+    },
+    select: {
+      id: true,
+    },
+    orderBy: [{ id: "asc" }],
+  });
+
+  const caisse = pointDeVente
+    ? await db.caisse.findFirst({
+        where: {
+          organisationId,
+          pointDeVenteId: pointDeVente.id,
+        },
+        select: {
+          id: true,
+        },
+        orderBy: [{ id: "asc" }],
+      })
+    : null;
+
+  return {
+    pointDeVente,
+    caisse,
+  };
 };
 
 const saleInclude = {
@@ -107,23 +137,6 @@ const formatSaleResponse = (sale) => ({
       : null,
   })),
 });
-
-const generateTicketNumber = (pointDeVenteId) => {
-  const now = new Date();
-  const datePart = [
-    now.getFullYear(),
-    String(now.getMonth() + 1).padStart(2, "0"),
-    String(now.getDate()).padStart(2, "0"),
-  ].join("");
-  const timePart = [
-    String(now.getHours()).padStart(2, "0"),
-    String(now.getMinutes()).padStart(2, "0"),
-    String(now.getSeconds()).padStart(2, "0"),
-  ].join("");
-  const randomPart = randomBytes(2).toString("hex").toUpperCase();
-
-  return `TCK-${pointDeVenteId}-${datePart}${timePart}-${randomPart}`;
-};
 
 const normalizeItems = (items) => {
   if (!Array.isArray(items) || items.length === 0) {
@@ -222,9 +235,16 @@ const createSale = async (req, res) => {
     const requestedUtilisateurId = parseId(req.body.utilisateurId ?? req.body.userId);
     const paymentMethod = normalizePaymentMethod(req.body.paymentMethod);
     const items = normalizeItems(req.body.items);
+    const singleStoreContext =
+      req.user.role === "EMPLOYE" ? null : await getSingleStoreContext(organisationId);
     const pointDeVenteId =
-      req.user.role === "EMPLOYE" ? req.user.pointDeVenteId : requestedPointDeVenteId;
-    const caisseId = req.user.role === "EMPLOYE" ? req.user.caisseId : requestedCaisseId;
+      req.user.role === "EMPLOYE"
+        ? req.user.pointDeVenteId
+        : requestedPointDeVenteId || singleStoreContext?.pointDeVente?.id || null;
+    const caisseId =
+      req.user.role === "EMPLOYE"
+        ? req.user.caisseId
+        : requestedCaisseId || singleStoreContext?.caisse?.id || null;
     const utilisateurId = req.user.id;
 
     if (!pointDeVenteId || !caisseId) {
@@ -421,7 +441,12 @@ const createSale = async (req, res) => {
       const createdSale = await tx.vente.create({
         data: {
           organisationId,
-          numeroTicket: generateTicketNumber(pointDeVenteId),
+          numeroTicket: await buildAnnualDocumentNumber({
+            tx,
+            model: "vente",
+            field: "numeroTicket",
+            date: new Date(),
+          }),
           total,
           paymentMethod,
           pointDeVenteId,

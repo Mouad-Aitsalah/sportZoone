@@ -1,6 +1,7 @@
 const jwt = require("jsonwebtoken");
 const prisma = require("../config/prisma");
 const { createHttpError } = require("../utils/httpError");
+const { normalizeUserRole } = require("../utils/roleUtils");
 
 const authMiddleware = async (req, res, next) => {
   const authHeader = req.headers.authorization;
@@ -47,7 +48,10 @@ const authMiddleware = async (req, res, next) => {
       return next(createHttpError(401, "Utilisateur non autorise."));
     }
 
-    req.user = user;
+    req.user = {
+      ...user,
+      role: normalizeUserRole(user.role),
+    };
     next();
   } catch (error) {
     console.error("Auth middleware error:", error);

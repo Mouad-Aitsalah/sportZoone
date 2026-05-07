@@ -1,7 +1,6 @@
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { Prisma } = require("@prisma/client");
-const { randomBytes } = require("crypto");
 const prisma = require("../config/prisma");
 const { createHttpError } = require("../utils/httpError");
 const { validateSchema } = require("../utils/validation");
@@ -9,7 +8,9 @@ const {
   loginSchema,
   customerCreateSchema,
   customerCreditPaymentSchema,
+  salePaymentSchema,
   saleCreateSchema,
+  refundCreateSchema,
   stockEntrySchema,
   stockCorrectionSchema,
 } = require("../utils/validationSchemas");
@@ -24,6 +25,31 @@ const {
   ensureEmployeeStoreAccess,
   ensureEmployeeCashRegisterAccess,
 } = require("../utils/organisationScope");
+const {
+  COMPTE_TYPES,
+  buildNextNumeroClient,
+  buildNextNumeroCompte,
+  compteInclude,
+  toApiCustomerFromCompte,
+  toApiSupplierFromCompte,
+  resolveCustomerCompte,
+  getCompteById,
+} = require("../services/compteService");
+const {
+  ensureOpenCashSession,
+  recalculateCashSessionMetrics,
+} = require("../services/cashSessionService");
+const {
+  buildAnnualDocumentNumber,
+} = require("../services/annualSequenceService");
+const {
+  buildProductVariantKey,
+  getVariantColor,
+  getVariantLabel,
+  getVariantSize,
+  sumVariantStock,
+  toApiVariant,
+} = require("../services/productVariantService");
 
 const isBlankString = (value) => typeof value === "string" && value.trim() === "";
 
@@ -69,6 +95,11 @@ const PAYMENT_METHOD_ALIASES = {
   mobile_money: "mobile_money",
   "mobile-money": "mobile_money",
   mobilemoney: "mobile_money",
+  partial: "partial",
+  partial_payment: "partial",
+  "partial-payment": "partial",
+  paiement_partiel: "partial",
+  "paiement-partiel": "partial",
   other: "other",
 };
 
@@ -129,7 +160,17 @@ const createToken = (user) =>
     }
   );
 
-const mapRoleToApi = (role) => (role === "ADMIN" ? "admin" : "employe");
+const mapRoleToApi = (role) => {
+  if (role === "SUPER_ADMIN") {
+    return "super_admin";
+  }
+
+  if (role === "ADMIN_GLOBAL") {
+    return "admin_global";
+  }
+
+  return role === "ADMIN" ? "admin" : "employe";
+};
 
 const decimalToNumber = (value) => {
   if (value instanceof Prisma.Decimal) {
@@ -149,6 +190,7 @@ const toApiUser = (user) => ({
   email: user.email,
   role: mapRoleToApi(user.role),
   organisationId: user.organisationId,
+  organisationName: user.organisation?.name || null,
   storeId: user.pointDeVenteId,
   storeName: user.pointDeVente ? user.pointDeVente.nom : null,
   cashRegisterId: user.caisseId,
@@ -165,44 +207,94 @@ const toApiCashRegister = (caisse) => ({
   isActive: caisse.estActive,
 });
 
-const toApiProduct = (product) => ({
+const buildEmptySalesStats = () => ({
+  quantitySold: 0,
+  revenue: 0,
+  ticketsCount: 0,
+});
+
+const toApiProduct = (product, salesStats = null) => {
+  const normalizedSalesStats = salesStats || buildEmptySalesStats();
+  const variants = (product.variantes || []).map((variant) => {
+    const variantStats =
+      normalizedSalesStats.variantStats?.get(variant.id) || buildEmptySalesStats();
+
+    return {
+      ...toApiVariant(variant, product),
+      quantitySold: Number(variantStats.quantitySold || 0),
+      revenue: Number(variantStats.revenue || 0),
+      ticketsCount: Number(variantStats.ticketsCount || 0),
+    };
+  });
+  const activeVariants = variants.filter((variant) => variant.active);
+
+  return {
   id: product.id,
   name: product.nom,
   barcode: product.codeBarres,
   organisationId: product.organisationId,
-  category: product.categorie,
+  categoryId: product.categorieProduit?.id || product.categorieId || null,
+  categoryCode: product.categorieProduit?.code || null,
+  category: product.categorieProduit?.nom || product.categorie,
+  categoryFullName: product.categorieProduit?.nomComplet || product.categorie,
   purchasePrice: decimalToNumber(product.prixAchat),
   salePrice: decimalToNumber(product.prixVente),
-  supplierId: product.fournisseurId,
-  supplierName: product.fournisseur ? product.fournisseur.nom : null,
+  vatRate: decimalToNumber(product.tauxTVA),
+  tauxTVA: decimalToNumber(product.tauxTVA),
+  retailPrice: decimalToNumber(product.prixDetail),
+  prixDetail: decimalToNumber(product.prixDetail),
+  wholesalePrice: decimalToNumber(product.prixGros),
+  prixGros: decimalToNumber(product.prixGros),
+  miniWholesalePrice: decimalToNumber(product.prixMiniGros),
+  prixMiniGros: decimalToNumber(product.prixMiniGros),
+  compteId: product.fournisseur?.compte?.id || product.fournisseurId,
+  supplierCompteId: product.fournisseur?.compte?.id || product.fournisseurId,
+  supplierId: product.fournisseur?.compte?.id || product.fournisseurId,
+  supplierName:
+    product.fournisseur?.compte?.nom || product.fournisseur?.nom || null,
   active: product.estActif,
-});
-
-const toApiCustomer = (client) => ({
-  id: client.id,
-  customerNumber: client.numeroClient,
-  organisationId: client.organisationId,
-  name: client.nom,
-  phone: client.telephone,
-  email: client.email,
-  credit: decimalToNumber(client.credit),
-  active: client.estActif,
-});
-
-const buildCustomerSummary = (client) => {
-  const ventes = client.ventes || [];
-  const totalPurchases = ventes.reduce(
-    (total, vente) => total.plus(vente.total),
-    new Prisma.Decimal(0)
-  );
-
-  return {
-    ...toApiCustomer(client),
-    totalPurchases: decimalToNumber(totalPurchases),
-    salesCount:
-      client._count?.ventes !== undefined ? client._count.ventes : ventes.length,
+  stock:
+    product.stock !== undefined && product.stock !== null
+      ? Number(product.stock)
+      : sumVariantStock(variants),
+  minimumThreshold: Number(product.seuilMinimum || 0),
+  quantitySold: Number(normalizedSalesStats.quantitySold || 0),
+  revenue: Number(normalizedSalesStats.revenue || 0),
+  ticketsCount: Number(normalizedSalesStats.ticketsCount || 0),
+  hasMultipleVariants: activeVariants.length > 1,
+  variants,
   };
 };
+
+const buildVariantSummary = (variant, product = null) => ({
+  id: variant?.id || null,
+  size: getVariantSize(variant),
+  color: getVariantColor(variant),
+  label: getVariantLabel(variant),
+  barcode: variant?.codeBarres || null,
+  salePrice:
+    variant?.prixVente === null || variant?.prixVente === undefined
+      ? variant?.salePrice === null || variant?.salePrice === undefined
+        ? decimalToNumber(product?.prixVente ?? product?.prixDetail)
+        : Number(variant.salePrice)
+      : decimalToNumber(variant.prixVente),
+  purchasePrice:
+    variant?.prixAchat === null || variant?.prixAchat === undefined
+      ? variant?.purchasePrice === null || variant?.purchasePrice === undefined
+        ? decimalToNumber(product?.prixAchat)
+        : Number(variant.purchasePrice)
+      : decimalToNumber(variant.prixAchat),
+  stock: Number(variant?.quantiteStock ?? variant?.stock ?? 0),
+  minimumThreshold: Number(variant?.seuilMinimum ?? product?.seuilMinimum ?? 0),
+  active:
+    variant?.actif === undefined && variant?.active === undefined
+      ? true
+      : Boolean(variant?.actif ?? variant?.active),
+});
+
+const toApiCustomer = (compte) => toApiCustomerFromCompte(compte);
+
+const buildCustomerSummary = (compte) => toApiCustomerFromCompte(compte);
 
 const toApiCustomerPayment = (paiement) => ({
   id: paiement.id,
@@ -223,12 +315,31 @@ const getDecimalValue = (value) => {
   return new Prisma.Decimal(value);
 };
 
-const getLineNetProfit = (line) => {
-  const unitSalePrice = getDecimalValue(line.prixUnitaire);
-  const purchasePrice = getDecimalValue(line.produit?.prixAchat);
-  const quantity = new Prisma.Decimal(line.quantite || 0);
+const getLinePurchasePrice = (line) => {
+  if (line?.variante?.prixAchat !== undefined && line?.variante?.prixAchat !== null) {
+    return getDecimalValue(line.variante.prixAchat);
+  }
 
-  return unitSalePrice.minus(purchasePrice).times(quantity);
+  return getDecimalValue(line?.produit?.prixAchat);
+};
+
+const getLineTotalPurchase = (line) => {
+  const purchasePrice = getLinePurchasePrice(line);
+  const quantity = getDecimalValue(line?.quantite).abs();
+  const subtotal = getDecimalValue(line?.sousTotal);
+  const totalPurchase = purchasePrice.times(quantity);
+
+  return subtotal.lessThan(0) ? totalPurchase.mul(-1) : totalPurchase;
+};
+
+const getLineNetProfit = (line) => {
+  const unitSalePrice = getDecimalValue(line?.prixUnitaire).abs();
+  const purchasePrice = getLinePurchasePrice(line);
+  const quantity = getDecimalValue(line?.quantite).abs();
+  const subtotal = getDecimalValue(line?.sousTotal);
+  const grossMargin = unitSalePrice.minus(purchasePrice).times(quantity);
+
+  return subtotal.lessThan(0) ? grossMargin.mul(-1) : grossMargin;
 };
 
 const getStockStatusMeta = (quantity, minimumThreshold) => {
@@ -255,16 +366,34 @@ const getStockStatusMeta = (quantity, minimumThreshold) => {
   };
 };
 
-const toApiStock = (stock) => {
+const toApiStock = (stock, options = {}) => {
+  const { includeFinancialFields = true } = options;
   const minimumThreshold =
-    stock.minimumThreshold ?? stock.produit?.seuilMinimum ?? 0;
-  const quantity = stock.quantity ?? stock.quantite ?? 0;
+    stock.minimumThreshold ??
+    stock.variante?.seuilMinimum ??
+    stock.produit?.seuilMinimum ??
+    0;
+  const quantity =
+    stock.quantity ?? stock.quantite ?? stock.variante?.quantiteStock ?? 0;
+  const purchasePrice =
+    stock.purchasePrice ??
+    stock.variante?.prixAchat ??
+    stock.produit?.prixAchat ??
+    0;
   const statusMeta = getStockStatusMeta(quantity, minimumThreshold);
+  const variantSize = stock.variantSize ?? getVariantSize(stock.variante);
+  const variantColor = stock.variantColor ?? getVariantColor(stock.variante);
+  const variantLabel =
+    stock.variantLabel ?? (stock.variante ? getVariantLabel(stock.variante) : null);
 
-  return {
+  const apiStock = {
     id: stock.id,
     productId: stock.productId ?? stock.produitId,
     productName: stock.productName ?? stock.produit?.nom ?? "",
+    variantId: stock.variantId ?? stock.varianteId ?? stock.variante?.id ?? null,
+    variantSize,
+    variantColor,
+    variantLabel,
     barcode: stock.barcode ?? stock.produit?.codeBarres ?? "",
     storeId: stock.storeId ?? stock.pointDeVenteId,
     storeName: stock.storeName ?? stock.pointDeVente?.nom ?? "",
@@ -274,6 +403,12 @@ const toApiStock = (stock) => {
     isLowStock: statusMeta.isLowStock,
     severity: statusMeta.severity,
   };
+
+  if (includeFinancialFields) {
+    apiStock.purchasePrice = decimalToNumber(purchasePrice);
+  }
+
+  return apiStock;
 };
 
 const buildReturnedQuantitiesMap = (retours = []) => {
@@ -284,6 +419,17 @@ const buildReturnedQuantitiesMap = (retours = []) => {
       retour.produitId,
       (returnedQuantities.get(retour.produitId) || 0) + retour.quantite
     );
+  }
+
+  return returnedQuantities;
+};
+
+const buildReturnedVariantQuantitiesMap = (retours = []) => {
+  const returnedQuantities = new Map();
+
+  for (const retour of retours) {
+    const key = buildProductVariantKey(retour.produitId, retour.varianteId);
+    returnedQuantities.set(key, (returnedQuantities.get(key) || 0) + retour.quantite);
   }
 
   return returnedQuantities;
@@ -420,6 +566,42 @@ const getEmployeeCashRegisterId = (user) => {
   return user.caisseId || null;
 };
 
+const getPrimaryStore = async (organisationId, db = prisma) =>
+  db.pointDeVente.findFirst({
+    where: {
+      organisationId,
+    },
+    select: {
+      id: true,
+      nom: true,
+    },
+    orderBy: [{ id: "asc" }],
+  });
+
+const getPrimaryCashRegister = async (organisationId, pointDeVenteId, db = prisma) =>
+  db.caisse.findFirst({
+    where: {
+      organisationId,
+      ...(pointDeVenteId ? { pointDeVenteId } : {}),
+    },
+    select: {
+      id: true,
+      nom: true,
+      pointDeVenteId: true,
+      estActive: true,
+    },
+    orderBy: [{ id: "asc" }],
+  });
+
+const getSingleStoreContext = async (organisationId, db = prisma) => {
+  const store = await getPrimaryStore(organisationId, db);
+  const cashRegister = store
+    ? await getPrimaryCashRegister(organisationId, store.id, db)
+    : null;
+
+  return { store, cashRegister };
+};
+
 const getDefaultCustomer = async (user, db = prisma) => {
   const defaultCustomer = await db.client.findFirst({
     where: {
@@ -436,6 +618,30 @@ const getDefaultCustomer = async (user, db = prisma) => {
   }
 
   return defaultCustomer;
+};
+
+const getDefaultCustomerCompte = async (user, db = prisma) => {
+  const organisationId = getOrganisationIdFromUser(user);
+  const defaultCustomer = await getDefaultCustomer(user, db);
+  const defaultCompte = await db.compte.findFirst({
+    where: {
+      organisationId,
+      type: COMPTE_TYPES.CLIENT,
+      clientSourceId: defaultCustomer.id,
+    },
+    include: {
+      clientSource: true,
+    },
+  });
+
+  if (!defaultCompte) {
+    throw createHttpError(
+      500,
+      'Le compte par defaut "Client inconnu" est manquant.'
+    );
+  }
+
+  return defaultCompte;
 };
 
 const ensureProductAndStoreExist = async (user, produitId, pointDeVenteId) => {
@@ -475,6 +681,22 @@ const ensureProductAndStoreExist = async (user, produitId, pointDeVenteId) => {
   }
 };
 
+const ensureVariantForProduct = async (organisationId, produitId, varianteId) => {
+  const variant = await prisma.produitVariante.findFirst({
+    where: {
+      organisationId,
+      produitId,
+      id: varianteId,
+    },
+  });
+
+  if (!variant) {
+    throw createHttpError(404, "Product variant not found.");
+  }
+
+  return variant;
+};
+
 const isEmptyRequestBody = (body) =>
   !body ||
   (typeof body === "object" &&
@@ -505,6 +727,17 @@ const validatePositiveInteger = (value, fieldName) => {
   const numericValue = parseRequiredNumber(value, message);
 
   if (!Number.isInteger(numericValue) || numericValue <= 0) {
+    throw createHttpError(400, message, "BAD_REQUEST");
+  }
+
+  return numericValue;
+};
+
+const validatePositiveNumber = (value, fieldName) => {
+  const message = `${fieldName} must be a positive number`;
+  const numericValue = parseRequiredNumber(value, message);
+
+  if (numericValue <= 0) {
     throw createHttpError(400, message, "BAD_REQUEST");
   }
 
@@ -545,23 +778,32 @@ const normalizeSaleItems = (items) => {
       getAliasedValue(item, "productId", "produitId"),
       "productId"
     );
-    const quantity = validatePositiveInteger(
+    const rawVariantId = getAliasedValue(item, "variantId", "varianteId");
+    const variantId =
+      rawVariantId === undefined || rawVariantId === null || isBlankString(rawVariantId)
+        ? null
+        : validatePositiveInteger(rawVariantId, "variantId");
+    const quantity = validatePositiveNumber(
       getAliasedValue(item, "quantity", "quantite"),
       "quantity"
     );
-
-    validateNonNegativeNumber(
+    const unitPrice = validatePositiveNumber(
       getAliasedValue(item, "unitPrice", "prixUnitaire"),
       "unitPrice"
     );
 
-    groupedItems.set(productId, (groupedItems.get(productId) || 0) + quantity);
+    const itemKey = `${buildProductVariantKey(productId, variantId)}:${unitPrice}`;
+    const existingItem = groupedItems.get(itemKey);
+
+    groupedItems.set(itemKey, {
+      productId,
+      variantId,
+      quantity: (existingItem?.quantity || 0) + quantity,
+      unitPrice,
+    });
   }
 
-  return Array.from(groupedItems.entries()).map(([productId, quantity]) => ({
-    productId,
-    quantity,
-  }));
+  return Array.from(groupedItems.values());
 };
 
 const normalizeReturnItems = (items) => {
@@ -584,35 +826,71 @@ const normalizeReturnItems = (items) => {
       getAliasedValue(item, "productId", "produitId"),
       "productId"
     );
-    const quantity = validatePositiveInteger(
+    const rawVariantId = getAliasedValue(item, "variantId", "varianteId");
+    const variantId =
+      rawVariantId === undefined || rawVariantId === null || isBlankString(rawVariantId)
+        ? null
+        : validatePositiveInteger(rawVariantId, "variantId");
+    const quantity = validatePositiveNumber(
       getAliasedValue(item, "quantity", "quantite"),
       "quantity"
     );
 
-    groupedItems.set(productId, (groupedItems.get(productId) || 0) + quantity);
+    const itemKey = buildProductVariantKey(productId, variantId);
+    const existingItem = groupedItems.get(itemKey);
+
+    groupedItems.set(itemKey, {
+      productId,
+      variantId,
+      quantity: (existingItem?.quantity || 0) + quantity,
+    });
   }
 
-  return Array.from(groupedItems.entries()).map(([productId, quantity]) => ({
-    productId,
-    quantity,
-  }));
+  return Array.from(groupedItems.values());
 };
 
-const generateTicketNumber = (storeId) => {
-  const now = new Date();
-  const datePart = [
-    now.getFullYear(),
-    String(now.getMonth() + 1).padStart(2, "0"),
-    String(now.getDate()).padStart(2, "0"),
-  ].join("");
-  const timePart = [
-    String(now.getHours()).padStart(2, "0"),
-    String(now.getMinutes()).padStart(2, "0"),
-    String(now.getSeconds()).padStart(2, "0"),
-  ].join("");
-  const randomPart = randomBytes(2).toString("hex").toUpperCase();
+const normalizeRefundItems = (items) => {
+  if (items === undefined || items === null) {
+    throw createHttpError(400, "items is required", "BAD_REQUEST");
+  }
 
-  return `TCK-${storeId}-${datePart}${timePart}-${randomPart}`;
+  if (!Array.isArray(items) || items.length === 0) {
+    throw createHttpError(400, "items must be a non-empty array", "BAD_REQUEST");
+  }
+
+  const groupedItems = new Map();
+
+  for (const item of items) {
+    const productId = validatePositiveInteger(
+      getAliasedValue(item, "productId", "produitId"),
+      "productId"
+    );
+    const rawVariantId = getAliasedValue(item, "variantId", "varianteId");
+    const variantId =
+      rawVariantId === undefined || rawVariantId === null || isBlankString(rawVariantId)
+        ? null
+        : validatePositiveInteger(rawVariantId, "variantId");
+    const quantity = validatePositiveNumber(
+      getAliasedValue(item, "quantity", "quantite"),
+      "quantity"
+    );
+    const rawUnitPrice = getAliasedValue(item, "unitPrice", "prixUnitaire");
+    const unitPrice =
+      rawUnitPrice === undefined
+        ? null
+        : validateNonNegativeNumber(rawUnitPrice, "unitPrice");
+    const itemKey = buildProductVariantKey(productId, variantId);
+    const existingItem = groupedItems.get(itemKey);
+
+    groupedItems.set(itemKey, {
+      productId,
+      variantId,
+      quantity: (existingItem?.quantity || 0) + quantity,
+      unitPrice: unitPrice ?? existingItem?.unitPrice ?? null,
+    });
+  }
+
+  return Array.from(groupedItems.values());
 };
 
 const extractCityFromAddress = (address) => {
@@ -645,8 +923,29 @@ const createStockMovement = async (
 
 const restoreStockForProduct = async (
   db,
-  { organisationId, productId, storeId, quantity, type, reason = null }
+  {
+    organisationId,
+    productId,
+    variantId = null,
+    storeId,
+    quantity,
+    type,
+    reason = null,
+  }
 ) => {
+  if (variantId) {
+    await db.produitVariante.update({
+      where: {
+        id: variantId,
+      },
+      data: {
+        quantiteStock: {
+          increment: quantity,
+        },
+      },
+    });
+  }
+
   await db.stock.upsert({
     where: {
       organisationId_produitId_pointDeVenteId: {
@@ -678,6 +977,103 @@ const restoreStockForProduct = async (
   });
 };
 
+const syncAggregateStockForProduct = async (db, organisationId, productId, storeId) => {
+  const variantAggregate = await db.produitVariante.aggregate({
+    where: {
+      organisationId,
+      produitId: productId,
+    },
+    _sum: {
+      quantiteStock: true,
+    },
+  });
+
+  await db.stock.upsert({
+    where: {
+      organisationId_produitId_pointDeVenteId: {
+        organisationId,
+        produitId: productId,
+        pointDeVenteId: storeId,
+      },
+    },
+    update: {
+      quantite: variantAggregate._sum.quantiteStock || 0,
+    },
+    create: {
+      organisationId,
+      produitId: productId,
+      pointDeVenteId: storeId,
+      quantite: variantAggregate._sum.quantiteStock || 0,
+    },
+  });
+};
+
+const adjustVariantAndAggregateStock = async (
+  db,
+  { organisationId, productId, variantId, storeId, quantityDelta, reason, type }
+) => {
+  await db.produitVariante.update({
+    where: {
+      id: variantId,
+    },
+    data: {
+      quantiteStock:
+        quantityDelta >= 0
+          ? {
+              increment: quantityDelta,
+            }
+          : {
+              decrement: Math.abs(quantityDelta),
+            },
+    },
+  });
+
+  await syncAggregateStockForProduct(db, organisationId, productId, storeId);
+
+  await createStockMovement(db, {
+    organisationId,
+    productId,
+    storeId,
+    quantity: quantityDelta,
+    type,
+    reason,
+  });
+};
+
+const ensureResolvedVariant = ({
+  item,
+  product,
+  variantsByProductId,
+}) => {
+  if (item.variantId) {
+    const variant = (variantsByProductId.get(item.productId) || []).find(
+      (candidate) => candidate.id === item.variantId
+    );
+
+    if (!variant) {
+      throw createHttpError(
+        400,
+        `Variant ${item.variantId} is invalid for product ${product.nom}.`
+      );
+    }
+
+    return variant;
+  }
+
+  const activeVariants = (variantsByProductId.get(item.productId) || []).filter(
+    (variant) => variant.actif
+  );
+
+  if (activeVariants.length !== 1) {
+    throw createHttpError(
+      400,
+      `A variant selection is required for product ${product.nom}.`
+    );
+  }
+
+  return activeVariants[0];
+};
+
 const login = async (req, res) => {
   const { email: validatedEmail, password } = validateSchema(loginSchema, {
     email: req.body.email,
@@ -692,6 +1088,11 @@ const login = async (req, res) => {
   const user = await prisma.utilisateur.findUnique({
     where: { email },
     include: {
+      organisation: {
+        select: {
+          name: true,
+        },
+      },
       pointDeVente: {
         select: {
           nom: true,
@@ -753,10 +1154,27 @@ const getProducts = async (req, res) => {
         organisationId,
       },
       include: {
+        categorieProduit: {
+          select: {
+            id: true,
+            code: true,
+            nom: true,
+            nomComplet: true,
+          },
+        },
         fournisseur: {
           select: {
             nom: true,
+            compte: {
+              select: {
+                id: true,
+                nom: true,
+              },
+            },
           },
+        },
+        variantes: {
+          orderBy: [{ id: "asc" }],
         },
       },
       orderBy: {
@@ -767,14 +1185,196 @@ const getProducts = async (req, res) => {
     }),
   ]);
 
+  const productIds = products.map((product) => product.id);
+  const salesStatsByProductId = new Map();
+
+  if (productIds.length > 0) {
+    const saleLines = await prisma.venteLigne.findMany({
+      where: {
+        organisationId,
+        produitId: {
+          in: productIds,
+        },
+        vente: {
+          organisationId,
+          status: {
+            notIn: ["cancelled", "refunded"],
+          },
+          total: {
+            gt: 0,
+          },
+        },
+      },
+      select: {
+        produitId: true,
+        varianteId: true,
+        venteId: true,
+        quantite: true,
+        sousTotal: true,
+      },
+    });
+
+    for (const line of saleLines) {
+      const productId = line.produitId;
+      const variantId = line.varianteId || null;
+      const productStats =
+        salesStatsByProductId.get(productId) ||
+        {
+          ...buildEmptySalesStats(),
+          ticketIds: new Set(),
+          variantStats: new Map(),
+        };
+
+      productStats.quantitySold += Number(line.quantite || 0);
+      productStats.revenue += decimalToNumber(line.sousTotal || 0);
+      productStats.ticketIds.add(line.venteId);
+      productStats.ticketsCount = productStats.ticketIds.size;
+
+      if (variantId) {
+        const variantStats =
+          productStats.variantStats.get(variantId) ||
+          {
+            ...buildEmptySalesStats(),
+            ticketIds: new Set(),
+          };
+
+        variantStats.quantitySold += Number(line.quantite || 0);
+        variantStats.revenue += decimalToNumber(line.sousTotal || 0);
+        variantStats.ticketIds.add(line.venteId);
+        variantStats.ticketsCount = variantStats.ticketIds.size;
+        productStats.variantStats.set(variantId, variantStats);
+      }
+
+      salesStatsByProductId.set(productId, productStats);
+    }
+  }
+
   return res.status(200).json(
     buildPaginatedResponse({
-      data: products.map(toApiProduct),
+      data: products.map((product) =>
+        toApiProduct(product, salesStatsByProductId.get(product.id))
+      ),
       page,
       limit,
       total,
     })
   );
+};
+
+const getProductSales = async (req, res) => {
+  const organisationId = getOrganisationIdFromUser(req.user);
+  const productId = parsePositiveInteger(req.params.id);
+
+  if (Number.isNaN(productId)) {
+    throw createHttpError(400, "product id must be a valid positive integer.");
+  }
+
+  const product = await prisma.produit.findFirst({
+    where: {
+      id: productId,
+      organisationId,
+    },
+    select: {
+      id: true,
+      nom: true,
+    },
+  });
+
+  if (!product) {
+    throw createHttpError(404, "Product not found.");
+  }
+
+  const saleLines = await prisma.venteLigne.findMany({
+    where: {
+      organisationId,
+      produitId: productId,
+      vente: {
+        organisationId,
+        status: {
+          not: "cancelled",
+        },
+      },
+    },
+    include: {
+      vente: {
+        select: {
+          id: true,
+          numeroTicket: true,
+          dateVente: true,
+          status: true,
+          paymentStatus: true,
+          paymentMethod: true,
+          total: true,
+          client: {
+            select: {
+              id: true,
+              numeroClient: true,
+              nom: true,
+              compte: {
+                select: {
+                  id: true,
+                  nom: true,
+                },
+              },
+            },
+          },
+        },
+      },
+      variante: {
+        select: {
+          id: true,
+          taille: true,
+          couleur: true,
+          codeBarres: true,
+        },
+      },
+    },
+    orderBy: [
+      {
+        vente: {
+          dateVente: "desc",
+        },
+      },
+      {
+        id: "desc",
+      },
+    ],
+  });
+
+  return res.status(200).json({
+    data: saleLines.map((line) => {
+      const lineTotal = decimalToNumber(line.sousTotal);
+      const quantity = Number(line.quantite || 0);
+      const total = decimalToNumber(line.vente?.total);
+      const type = total < 0 || lineTotal < 0 || quantity < 0 ? "refund" : "sale";
+
+      return {
+        id: line.id,
+        saleId: line.venteId,
+        productId,
+        productName: product.nom,
+        variantId: line.varianteId,
+        variantLabel: line.variante ? getVariantLabel(line.variante) : null,
+        variant: line.variante ? buildVariantSummary(line.variante) : null,
+        ticketNumber: line.vente?.numeroTicket || "",
+        date: line.vente?.dateVente || null,
+        customerId: line.vente?.client?.compte?.id || line.vente?.client?.id || null,
+        customerNumber: line.vente?.client?.numeroClient || null,
+        customerName:
+          line.vente?.client?.compte?.nom ||
+          line.vente?.client?.nom ||
+          "Client inconnu",
+        quantity,
+        unitPrice: decimalToNumber(line.prixUnitaire),
+        lineTotal,
+        total,
+        status: line.vente?.status || null,
+        paymentStatus: line.vente?.paymentStatus || null,
+        paymentMethod: line.vente?.paymentMethod || null,
+        type,
+      };
+    }),
+  });
 };
 
 const getProductByBarcode = async (req, res) => {
@@ -799,24 +1399,8 @@ const getProductByBarcode = async (req, res) => {
     }
 
     storeId = employeeStoreId;
-  }
-
-  const product = await prisma.produit.findFirst({
-    where: {
-      organisationId,
-      codeBarres: barcode,
-    },
-    select: {
-      id: true,
-      nom: true,
-      codeBarres: true,
-      prixVente: true,
-      estActif: true,
-    },
-  });
-
-  if (!product || !product.estActif) {
-    throw createHttpError(404, "Product not found.");
+  } else if (!storeId) {
+    storeId = (await getPrimaryStore(organisationId))?.id || null;
   }
 
   if (storeId) {
@@ -832,23 +1416,95 @@ const getProductByBarcode = async (req, res) => {
     }
   }
 
-  const stockAggregation = await prisma.stock.aggregate({
+  const matchedVariant = await prisma.produitVariante.findFirst({
     where: {
       organisationId,
-      produitId: product.id,
-      ...(storeId ? { pointDeVenteId: storeId } : {}),
+      codeBarres: barcode,
+      actif: true,
     },
-    _sum: {
-      quantite: true,
+    include: {
+      produit: {
+        include: {
+          categorieProduit: {
+            select: {
+              id: true,
+              code: true,
+              nom: true,
+              nomComplet: true,
+            },
+          },
+          fournisseur: {
+            select: {
+              nom: true,
+              compte: {
+                select: {
+                  id: true,
+                  nom: true,
+                },
+              },
+            },
+          },
+          variantes: {
+            orderBy: [{ id: "asc" }],
+          },
+        },
+      },
     },
   });
 
+  const product = matchedVariant
+    ? matchedVariant.produit
+    : await prisma.produit.findFirst({
+        where: {
+          organisationId,
+          codeBarres: barcode,
+          estActif: true,
+        },
+        include: {
+          categorieProduit: {
+            select: {
+              id: true,
+              code: true,
+              nom: true,
+              nomComplet: true,
+            },
+          },
+          fournisseur: {
+            select: {
+              nom: true,
+              compte: {
+                select: {
+                  id: true,
+                  nom: true,
+                },
+              },
+            },
+          },
+          variantes: {
+            orderBy: [{ id: "asc" }],
+          },
+        },
+      });
+
+  if (!product || !product.estActif) {
+    throw createHttpError(404, "Product not found.");
+  }
+
+  const apiProduct = toApiProduct(product);
+  const activeVariants = apiProduct.variants.filter((variant) => variant.active);
+  const selectedVariant = matchedVariant
+    ? apiProduct.variants.find((variant) => variant.id === matchedVariant.id) || null
+    : activeVariants.length === 1
+    ? activeVariants[0]
+    : null;
+
   return res.status(200).json({
-    id: product.id,
-    name: product.nom,
-    barcode: product.codeBarres,
-    salePrice: decimalToNumber(product.prixVente),
-    stock: stockAggregation._sum.quantite || 0,
+    ...apiProduct,
+    requiresVariantSelection: !selectedVariant && activeVariants.length > 1,
+    selectedVariant,
+    scannedBarcode: barcode,
+    salePrice: selectedVariant?.salePrice ?? apiProduct.salePrice,
+    stock: selectedVariant?.stock ?? apiProduct.stock,
   });
 };
 
@@ -856,89 +1512,70 @@ const getStocks = async (req, res) => {
   const organisationId = getOrganisationIdFromUser(req.user);
   const employeeStoreId = getEmployeeStoreId(req.user);
   const { page, limit, skip } = getPaginationParams(req.query);
+  const includeFinancialFields = req.user.role === "ADMIN";
+  const primaryStore =
+    req.user.role === "ADMIN" ? await getPrimaryStore(organisationId) : null;
 
   if (req.user.role === "EMPLOYE" && !employeeStoreId) {
     throw createHttpError(403, "Employee is not assigned to a store.");
   }
 
-  const storesWhere =
-    req.user.role === "ADMIN"
-      ? {
-          organisationId,
-        }
-      : {
+  const store = req.user.role === "ADMIN"
+    ? primaryStore ||
+      (await prisma.pointDeVente.findFirst({
+        where: { organisationId },
+        select: { id: true, nom: true },
+        orderBy: { id: "asc" },
+      }))
+    : await prisma.pointDeVente.findFirst({
+        where: {
           organisationId,
           id: employeeStoreId,
-        };
+        },
+        select: { id: true, nom: true },
+      });
 
-  const [products, stores, stockRows] = await Promise.all([
-    prisma.produit.findMany({
-      where: {
-        organisationId,
+  const variantRows = await prisma.produitVariante.findMany({
+    where: {
+      organisationId,
+      produit: {
+        estActif: true,
       },
-      select: {
-        id: true,
-        nom: true,
-        codeBarres: true,
-        seuilMinimum: true,
+    },
+    include: {
+      produit: {
+        select: {
+          id: true,
+          nom: true,
+          codeBarres: true,
+          seuilMinimum: true,
+          prixAchat: true,
+        },
       },
-      orderBy: [{ nom: "asc" }, { id: "asc" }],
-    }),
-    prisma.pointDeVente.findMany({
-      where: storesWhere,
-      select: {
-        id: true,
-        nom: true,
-      },
-      orderBy: [{ nom: "asc" }, { id: "asc" }],
-    }),
-    prisma.stock.findMany({
-      where:
-        req.user.role === "ADMIN"
-          ? {
-              organisationId,
-            }
-          : {
-              organisationId,
-              pointDeVenteId: employeeStoreId,
-            },
-      select: {
-        id: true,
-        produitId: true,
-        pointDeVenteId: true,
-        quantite: true,
-      },
-    }),
-  ]);
+    },
+    orderBy: [{ produit: { nom: "asc" } }, { id: "asc" }],
+  });
 
-  const stockByProductAndStore = new Map(
-    stockRows.map((stock) => [
-      `${stock.produitId}-${stock.pointDeVenteId}`,
-      stock,
-    ])
+  const allStockRows = variantRows.map((variant) =>
+    toApiStock({
+      id: variant.id,
+      productId: variant.produitId,
+      productName: variant.produit?.nom || "",
+      variantId: variant.id,
+      variantSize: getVariantSize(variant),
+      variantColor: getVariantColor(variant),
+      variantLabel: getVariantLabel(variant),
+      barcode: variant.codeBarres || variant.produit?.codeBarres || "",
+      storeId: store?.id || null,
+      storeName: store?.nom || "",
+      quantity: variant.quantiteStock,
+      purchasePrice:
+        variant.prixAchat === null || variant.prixAchat === undefined
+          ? variant.produit?.prixAchat ?? 0
+          : variant.prixAchat,
+      minimumThreshold: variant.seuilMinimum ?? variant.produit?.seuilMinimum ?? 0,
+    }, { includeFinancialFields })
   );
-
-  const allStockRows = [];
-
-  for (const store of stores) {
-    for (const product of products) {
-      const stockKey = `${product.id}-${store.id}`;
-      const existingStock = stockByProductAndStore.get(stockKey);
-
-      allStockRows.push(
-        toApiStock({
-          id: existingStock?.id || `virtual-${product.id}-${store.id}`,
-          productId: product.id,
-          productName: product.nom,
-          barcode: product.codeBarres,
-          storeId: store.id,
-          storeName: store.nom,
-          quantity: existingStock?.quantite ?? 0,
-          minimumThreshold: product.seuilMinimum,
-        })
-      );
-    }
-  }
 
   const total = allStockRows.length;
   const stocks = allStockRows.slice(skip, skip + limit);
@@ -956,88 +1593,74 @@ const getStocks = async (req, res) => {
 const getStockAlerts = async (req, res) => {
   const organisationId = getOrganisationIdFromUser(req.user);
   const employeeStoreId = getEmployeeStoreId(req.user);
+  const primaryStore =
+    req.user.role === "ADMIN" ? await getPrimaryStore(organisationId) : null;
 
   if (req.user.role === "EMPLOYE" && !employeeStoreId) {
     throw createHttpError(403, "Employee is not assigned to a store.");
   }
 
-  const [products, stores, stockRows] = await Promise.all([
-    prisma.produit.findMany({
-      where: {
-        organisationId,
+  const store = req.user.role === "EMPLOYE"
+    ? await prisma.pointDeVente.findFirst({
+        where: {
+          organisationId,
+          id: employeeStoreId,
+        },
+        select: { id: true, nom: true },
+      })
+    : primaryStore ||
+      (await prisma.pointDeVente.findFirst({
+        where: { organisationId },
+        select: { id: true, nom: true },
+        orderBy: { id: "asc" },
+      }));
+  const variants = await prisma.produitVariante.findMany({
+    where: {
+      organisationId,
+      actif: true,
+      produit: {
+        estActif: true,
       },
-      select: {
-        id: true,
-        nom: true,
-        seuilMinimum: true,
+    },
+    include: {
+      produit: {
+        select: {
+          id: true,
+          nom: true,
+          seuilMinimum: true,
+        },
       },
-    }),
-    prisma.pointDeVente.findMany({
-      where:
-        req.user.role === "EMPLOYE"
-          ? {
-              organisationId,
-              id: employeeStoreId,
-            }
-          : {
-              organisationId,
-            },
-      select: {
-        id: true,
-        nom: true,
-      },
-    }),
-    prisma.stock.findMany({
-      where:
-        req.user.role === "EMPLOYE"
-          ? {
-              organisationId,
-              pointDeVenteId: employeeStoreId,
-            }
-          : {
-              organisationId,
-            },
-      select: {
-        id: true,
-        produitId: true,
-        pointDeVenteId: true,
-        quantite: true,
-      },
-    }),
-  ]);
-
-  const stockByProductAndStore = new Map(
-    stockRows.map((stock) => [
-      `${stock.produitId}-${stock.pointDeVenteId}`,
-      stock,
-    ])
-  );
+    },
+  });
 
   const lowStockItems = [];
 
-  for (const store of stores) {
-    for (const product of products) {
-      const existingStock = stockByProductAndStore.get(`${product.id}-${store.id}`);
-      const quantity = existingStock?.quantite ?? 0;
-      const statusMeta = getStockStatusMeta(quantity, product.seuilMinimum);
+  for (const variant of variants) {
+    const quantity = Number(variant.quantiteStock || 0);
+    const minimumThreshold = Number(
+      variant.seuilMinimum ?? variant.produit?.seuilMinimum ?? 0
+    );
+    const statusMeta = getStockStatusMeta(quantity, minimumThreshold);
 
-      if (!statusMeta.isLowStock) {
-        continue;
-      }
-
-      lowStockItems.push({
-        id: existingStock?.id || `virtual-${product.id}-${store.id}`,
-        produitId: product.id,
-        produitNom: product.nom,
-        magasin: store.nom,
-        magasinId: store.id,
-        quantite: quantity,
-        seuilMinimum: product.seuilMinimum,
-        isLowStock: true,
-        severity: statusMeta.severity,
-        status: statusMeta.status,
-      });
+    if (!statusMeta.isLowStock) {
+      continue;
     }
+
+    lowStockItems.push({
+      id: variant.id,
+      produitId: variant.produitId,
+      produitNom: variant.produit?.nom || "",
+      taille: getVariantSize(variant),
+      couleur: getVariantColor(variant),
+      variante: getVariantLabel(variant),
+      magasin: store?.nom || "",
+      magasinId: store?.id || null,
+      quantite: quantity,
+      seuilMinimum: minimumThreshold,
+      isLowStock: true,
+      severity: statusMeta.severity,
+      status: statusMeta.status,
+    });
   }
 
   lowStockItems.sort((a, b) => {
@@ -1057,35 +1680,39 @@ const stockIn = async (req, res) => {
   const organisationId = getOrganisationIdFromUser(req.user);
   const parsedInput = validateSchema(stockEntrySchema, {
     productId: req.body.productId,
+    variantId: req.body.variantId,
     storeId: req.body.storeId,
     quantity: req.body.quantity,
     reason: req.body.reason,
   });
   const productId = parsePositiveInteger(parsedInput.productId);
+  const variantId = parseOptionalPositiveInteger(parsedInput.variantId);
   const storeId = parsePositiveInteger(parsedInput.storeId);
   const quantity = parsePositiveInteger(parsedInput.quantity);
   const reason = normalizeOptionalString(parsedInput.reason);
 
   await ensureProductAndStoreExist(req.user, productId, storeId);
+  if (Number.isNaN(variantId) || variantId === null) {
+    throw createHttpError(400, "variantId must be a valid positive integer.");
+  }
 
-  const stock = await prisma.stock.upsert({
-    where: {
-      organisationId_produitId_pointDeVenteId: {
-        organisationId,
-        produitId: productId,
-        pointDeVenteId: storeId,
-      },
-    },
-    update: {
-      quantite: {
-        increment: quantity,
-      },
-    },
-    create: {
+  const variant = await ensureVariantForProduct(organisationId, productId, variantId);
+
+  await prisma.$transaction(async (tx) => {
+    await adjustVariantAndAggregateStock(tx, {
       organisationId,
-      produitId: productId,
-      pointDeVenteId: storeId,
-      quantite: quantity,
+      productId,
+      variantId,
+      storeId,
+      quantityDelta: quantity,
+      type: "IN",
+      reason: reason || `Entree stock ${variant.taille || ""} ${variant.couleur || ""}`.trim(),
+    });
+  });
+
+  const updatedVariant = await prisma.produitVariante.findUnique({
+    where: {
+      id: variantId,
     },
     include: {
       produit: {
@@ -1095,74 +1722,89 @@ const stockIn = async (req, res) => {
           seuilMinimum: true,
         },
       },
-      pointDeVente: {
-        select: {
-          nom: true,
-        },
-      },
     },
   });
 
-  await createStockMovement(prisma, {
-    organisationId,
-    productId,
-    storeId,
-    quantity,
-    type: "IN",
-    reason,
-  });
-
-  return res.status(200).json(toApiStock(stock));
+  return res.status(200).json(
+    toApiStock({
+      id: updatedVariant.id,
+      productId,
+      productName: updatedVariant.produit?.nom || "",
+      variantId,
+      variantSize: getVariantSize(updatedVariant),
+      variantColor: getVariantColor(updatedVariant),
+      variantLabel: getVariantLabel(updatedVariant),
+      barcode: updatedVariant.codeBarres || updatedVariant.produit?.codeBarres || "",
+      storeId,
+      storeName: (await prisma.pointDeVente.findUnique({
+        where: { id: storeId },
+        select: { nom: true },
+      }))?.nom || "",
+      quantity: updatedVariant.quantiteStock,
+      minimumThreshold:
+        updatedVariant.seuilMinimum ?? updatedVariant.produit?.seuilMinimum ?? 0,
+    })
+  );
 };
 
 const stockCorrection = async (req, res) => {
   const organisationId = getOrganisationIdFromUser(req.user);
   const parsedInput = validateSchema(stockCorrectionSchema, {
     productId: req.body.productId,
+    variantId: req.body.variantId,
     storeId: req.body.storeId,
     quantity: req.body.quantity,
     reason: req.body.reason,
   });
   const productId = parsePositiveInteger(parsedInput.productId);
+  const variantId = parseOptionalPositiveInteger(parsedInput.variantId);
   const storeId = parsePositiveInteger(parsedInput.storeId);
   const quantity = parseNonNegativeInteger(parsedInput.quantity);
   const reason = normalizeOptionalString(parsedInput.reason);
 
   await ensureProductAndStoreExist(req.user, productId, storeId);
+  if (Number.isNaN(variantId) || variantId === null) {
+    throw createHttpError(400, "variantId must be a valid positive integer.");
+  }
 
   const stock = await prisma.$transaction(async (tx) => {
-    const existingStock = await tx.stock.findUnique({
+    const existingVariant = await tx.produitVariante.findFirst({
       where: {
-        organisationId_produitId_pointDeVenteId: {
-          organisationId,
-          produitId: productId,
-          pointDeVenteId: storeId,
-        },
-      },
-      select: {
-        quantite: true,
+        organisationId,
+        produitId: productId,
+        id: variantId,
       },
     });
 
-    const previousQuantity = existingStock ? existingStock.quantite : 0;
-    const quantityDelta = quantity - previousQuantity;
+    if (!existingVariant) {
+      throw createHttpError(404, "Product variant not found.");
+    }
 
-    const updatedStock = await tx.stock.upsert({
+    const quantityDelta = quantity - Number(existingVariant.quantiteStock || 0);
+
+    await tx.produitVariante.update({
       where: {
-        organisationId_produitId_pointDeVenteId: {
-          organisationId,
-          produitId: productId,
-          pointDeVenteId: storeId,
-        },
+        id: variantId,
       },
-      update: {
-        quantite: quantity,
+      data: {
+        quantiteStock: quantity,
       },
-      create: {
-        organisationId,
-        produitId: productId,
-        pointDeVenteId: storeId,
-        quantite: quantity,
+    });
+
+    await syncAggregateStockForProduct(tx, organisationId, productId, storeId);
+
+    await createStockMovement(tx, {
+      organisationId,
+      productId,
+      storeId,
+      quantity: quantityDelta,
+      type: "CORRECTION",
+      reason: reason || `Correction stock ${getVariantLabel(existingVariant)}`,
+    });
+
+    return tx.produitVariante.findUnique({
+      where: {
+        id: variantId,
       },
       include: {
         produit: {
@@ -1172,27 +1814,29 @@ const stockCorrection = async (req, res) => {
             seuilMinimum: true,
           },
         },
-        pointDeVente: {
-          select: {
-            nom: true,
-          },
-        },
       },
     });
-
-    await createStockMovement(tx, {
-      organisationId,
-      productId,
-      storeId,
-      quantity: quantityDelta,
-      type: "CORRECTION",
-      reason,
-    });
-
-    return updatedStock;
   });
 
-  return res.status(200).json(toApiStock(stock));
+  return res.status(200).json(
+    toApiStock({
+      id: stock.id,
+      productId,
+      productName: stock.produit?.nom || "",
+      variantId,
+      variantSize: getVariantSize(stock),
+      variantColor: getVariantColor(stock),
+      variantLabel: getVariantLabel(stock),
+      barcode: stock.codeBarres || stock.produit?.codeBarres || "",
+      storeId,
+      storeName: (await prisma.pointDeVente.findUnique({
+        where: { id: storeId },
+        select: { nom: true },
+      }))?.nom || "",
+      quantity: stock.quantiteStock,
+      minimumThreshold: stock.seuilMinimum ?? stock.produit?.seuilMinimum ?? 0,
+    })
+  );
 };
 
 const createSale = async (req, res) => {
@@ -1207,10 +1851,13 @@ const createSale = async (req, res) => {
     userId: getAliasedValue(req.body, "userId", "utilisateurId"),
     customerId: getAliasedValue(req.body, "customerId", "clientId"),
     paymentMethod: req.body.paymentMethod,
+    paidAmount: getAliasedValue(req.body, "paidAmount", "montantPaye"),
+    remainingAmount: getAliasedValue(req.body, "remainingAmount", "resteAPayer"),
     total: req.body.total,
     items: Array.isArray(req.body.items)
       ? req.body.items.map((item) => ({
           productId: getAliasedValue(item, "productId", "produitId"),
+          variantId: getAliasedValue(item, "variantId", "varianteId"),
           quantity: getAliasedValue(item, "quantity", "quantite"),
           unitPrice: getAliasedValue(item, "unitPrice", "prixUnitaire"),
         }))
@@ -1228,6 +1875,12 @@ const createSale = async (req, res) => {
   );
   const requestedCustomerId = parseOptionalPositiveInteger(
     getAliasedValue(req.body, "customerId", "clientId")
+  );
+  const requestedPaidAmount = getAliasedValue(req.body, "paidAmount", "montantPaye");
+  const requestedRemainingAmount = getAliasedValue(
+    req.body,
+    "remainingAmount",
+    "resteAPayer"
   );
   const items = normalizeSaleItems(req.body.items);
   let frontendTotal;
@@ -1259,8 +1912,15 @@ const createSale = async (req, res) => {
   const isEmployee = req.user.role === "EMPLOYE";
   const employeeStoreId = getEmployeeStoreId(req.user);
   const employeeCashRegisterId = getEmployeeCashRegisterId(req.user);
-  const storeId = isEmployee ? employeeStoreId : requestedStoreId;
-  const cashRegisterId = isEmployee ? employeeCashRegisterId : requestedCashRegisterId;
+  const singleStoreContext = !isEmployee
+    ? await getSingleStoreContext(organisationId)
+    : null;
+  const storeId = isEmployee
+    ? employeeStoreId
+    : requestedStoreId || singleStoreContext?.store?.id || null;
+  const cashRegisterId = isEmployee
+    ? employeeCashRegisterId
+    : requestedCashRegisterId || singleStoreContext?.cashRegister?.id || null;
   const userId = req.user.id;
 
   if (!storeId) {
@@ -1303,7 +1963,7 @@ const createSale = async (req, res) => {
   if (!paymentMethod) {
     throw createHttpError(
       400,
-      "paymentMethod must be one of: cash, card, credit.",
+      "paymentMethod must be one of: cash, card, credit, partial.",
       "BAD_REQUEST"
     );
   }
@@ -1320,6 +1980,10 @@ const createSale = async (req, res) => {
     throw createHttpError(400, "total must be a valid number.", "BAD_REQUEST");
   }
 
+  let paidAmount = frontendTotal;
+  let remainingAmount = new Prisma.Decimal(0);
+  let paymentStatus = "PAID";
+
   if (isEmployee && (!employeeStoreId || !employeeCashRegisterId)) {
     throw createHttpError(
       403,
@@ -1328,32 +1992,28 @@ const createSale = async (req, res) => {
   }
 
   try {
-    const sale = await prisma.$transaction(async (tx) => {
-    const customer =
-      requestedCustomerId !== null
-        ? await tx.client.findFirst({
-            where: {
-              organisationId,
-              id: requestedCustomerId,
-            },
-          })
-        : await getDefaultCustomer(req.user, tx);
+    let sale = null;
 
-    if (!customer) {
-      throw createHttpError(404, "Customer not found.");
-    }
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        sale = await prisma.$transaction(async (tx) => {
+        const customerCompte =
+          requestedCustomerId !== null
+            ? await resolveCustomerCompte(tx, organisationId, requestedCustomerId)
+            : await getDefaultCustomerCompte(req.user, tx);
+        const customer = customerCompte.clientSource;
 
-    const pointDeVente = await tx.pointDeVente.findFirst({
-      where: {
-        organisationId,
-        id: storeId,
-      },
-      select: { id: true },
-    });
+        const pointDeVente = await tx.pointDeVente.findFirst({
+          where: {
+            organisationId,
+            id: storeId,
+          },
+          select: { id: true },
+        });
 
-    if (!pointDeVente) {
-      throw createHttpError(404, "Store not found.");
-    }
+        if (!pointDeVente) {
+          throw createHttpError(404, "Store not found.");
+        }
 
     const caisse = await tx.caisse.findFirst({
       where: {
@@ -1417,7 +2077,7 @@ const createSale = async (req, res) => {
       );
     }
 
-    const productIds = items.map((item) => item.productId);
+    const productIds = [...new Set(items.map((item) => item.productId))];
     const produits = await tx.produit.findMany({
       where: {
         organisationId,
@@ -1429,6 +2089,9 @@ const createSale = async (req, res) => {
         id: true,
         nom: true,
         prixVente: true,
+        prixAchat: true,
+        prixDetail: true,
+        seuilMinimum: true,
         estActif: true,
       },
     });
@@ -1443,46 +2106,63 @@ const createSale = async (req, res) => {
       );
     }
 
-    const stocks = await tx.stock.findMany({
+    const variants = await tx.produitVariante.findMany({
       where: {
         organisationId,
-        pointDeVenteId: storeId,
-        produitId: {
-          in: productIds,
-        },
+        produitId: { in: productIds },
       },
       select: {
+        id: true,
         produitId: true,
-        quantite: true,
+        taille: true,
+        couleur: true,
+        codeBarres: true,
+        prixVente: true,
+        quantiteStock: true,
+        seuilMinimum: true,
+        actif: true,
       },
     });
 
     const productMap = new Map(produits.map((produit) => [produit.id, produit]));
-    const stockMap = new Map(stocks.map((stock) => [stock.produitId, stock]));
+    const variantsByProductId = variants.reduce((map, variant) => {
+      const currentVariants = map.get(variant.produitId) || [];
+      currentVariants.push(variant);
+      map.set(variant.produitId, currentVariants);
+      return map;
+    }, new Map());
 
     const lignesData = [];
     let total = new Prisma.Decimal(0);
 
     for (const item of items) {
       const produit = productMap.get(item.productId);
-      const stock = stockMap.get(item.productId);
 
       if (!produit.estActif) {
         throw createHttpError(400, `Product ${produit.nom} is inactive.`);
       }
 
-      if (!stock) {
+      const variant = ensureResolvedVariant({
+        item,
+        product: produit,
+        variantsByProductId,
+      });
+
+      if (!variant.actif) {
         throw createHttpError(
           400,
-          `No stock found for product ${produit.nom} in the selected store.`
+          `Variant ${getVariantLabel(variant)} is inactive for product ${produit.nom}.`
         );
       }
 
-      if (stock.quantite < item.quantity) {
-        throw createHttpError(400, `Insufficient stock for product ${produit.nom}.`);
+      if (Number(variant.quantiteStock || 0) < item.quantity) {
+        throw createHttpError(
+          400,
+          `Insufficient stock for ${produit.nom} / ${getVariantLabel(variant)}.`
+        );
       }
 
-      const prixUnitaire = new Prisma.Decimal(produit.prixVente);
+      const prixUnitaire = new Prisma.Decimal(item.unitPrice);
       const sousTotal = prixUnitaire.mul(item.quantity);
 
       total = total.plus(sousTotal);
@@ -1490,6 +2170,7 @@ const createSale = async (req, res) => {
       lignesData.push({
         organisationId,
         produitId: item.productId,
+        varianteId: variant.id,
         quantite: item.quantity,
         prixUnitaire,
         sousTotal,
@@ -1505,24 +2186,125 @@ const createSale = async (req, res) => {
       );
     }
 
-    if (paymentMethod === "credit" && customer.numeroClient === 1) {
+  if (paymentMethod === "credit" && customer.numeroClient === 1) {
       throw createHttpError(
         400,
         'Credit payment is not allowed for "Client inconnu".'
       );
     }
 
+    if (paymentMethod === "partial") {
+      if (
+        requestedPaidAmount === undefined ||
+        requestedPaidAmount === null ||
+        isBlankString(requestedPaidAmount)
+      ) {
+        throw createHttpError(
+          400,
+          "paidAmount is required for partial payment.",
+          "BAD_REQUEST"
+        );
+      }
+
+      let parsedPaidAmount;
+
+      try {
+        parsedPaidAmount = new Prisma.Decimal(
+          validateNonNegativeNumber(requestedPaidAmount, "paidAmount")
+        );
+      } catch (error) {
+        throw createHttpError(400, "paidAmount must be a valid number.", "BAD_REQUEST");
+      }
+
+      if (parsedPaidAmount.lessThanOrEqualTo(0)) {
+        throw createHttpError(
+          400,
+          "paidAmount must be greater than 0 for partial payment.",
+          "BAD_REQUEST"
+        );
+      }
+
+      if (parsedPaidAmount.greaterThanOrEqualTo(total)) {
+        throw createHttpError(
+          400,
+          "paidAmount must be lower than total for partial payment.",
+          "BAD_REQUEST"
+        );
+      }
+
+      const expectedRemainingAmount = total.minus(parsedPaidAmount);
+
+      if (
+        requestedRemainingAmount !== undefined &&
+        requestedRemainingAmount !== null &&
+        !isBlankString(requestedRemainingAmount)
+      ) {
+        let parsedRemainingAmount;
+
+        try {
+          parsedRemainingAmount = new Prisma.Decimal(
+            validateNonNegativeNumber(requestedRemainingAmount, "remainingAmount")
+          );
+        } catch (error) {
+          throw createHttpError(
+            400,
+            "remainingAmount must be a valid number.",
+            "BAD_REQUEST"
+          );
+        }
+
+        if (
+          parsedRemainingAmount.minus(expectedRemainingAmount).abs().greaterThan(
+            SALE_TOTAL_TOLERANCE
+          )
+        ) {
+          throw createHttpError(
+            400,
+            "remainingAmount does not match total minus paidAmount.",
+            "BAD_REQUEST"
+          );
+        }
+      }
+
+      paidAmount = parsedPaidAmount;
+      remainingAmount = expectedRemainingAmount;
+      paymentStatus = "PARTIALLY_PAID";
+    } else if (paymentMethod === "credit") {
+      paidAmount = new Prisma.Decimal(0);
+      remainingAmount = total;
+      paymentStatus = "CREDIT";
+    }
+
+    const sessionCaisse = await ensureOpenCashSession(tx, {
+      organisationId,
+      caisseId: cashRegisterId,
+      pointDeVenteId: storeId,
+      utilisateurId: userId,
+      cashRegisterCode: caisse.code,
+      date: new Date(),
+    });
+    const numeroTicket = await buildAnnualDocumentNumber({
+      tx,
+      model: "vente",
+      field: "numeroTicket",
+      date: new Date(),
+    });
+
     const createdSale = await tx.vente.create({
       data: {
         organisationId,
-        numeroTicket: generateTicketNumber(storeId),
+        numeroTicket,
         total,
         paymentMethod,
+        paidAmount,
+        remainingAmount,
+        paymentStatus,
         status: "completed",
         pointDeVenteId: storeId,
         caisseId: cashRegisterId,
         utilisateurId: userId,
         clientId: customer.id,
+        sessionCaisseId: sessionCaisse.id,
         lignes: {
           create: lignesData,
         },
@@ -1533,36 +2315,33 @@ const createSale = async (req, res) => {
       },
     });
 
-    for (const item of items) {
-      const produit = productMap.get(item.productId);
-
-      const updatedStock = await tx.stock.updateMany({
+    for (const line of lignesData) {
+      const produit = productMap.get(line.produitId);
+      const variant = await tx.produitVariante.findUnique({
         where: {
-          organisationId,
-          produitId: item.productId,
-          pointDeVenteId: storeId,
-          quantite: {
-            gte: item.quantity,
-          },
-        },
-        data: {
-          quantite: {
-            decrement: item.quantity,
-          },
+          id: line.varianteId,
         },
       });
 
-      if (updatedStock.count === 0) {
-        throw createHttpError(400, `Insufficient stock for product ${produit.nom}.`);
+      if (!variant) {
+        throw createHttpError(404, "Product variant not found.");
       }
 
-      await createStockMovement(tx, {
+      if (Number(variant.quantiteStock || 0) < line.quantite) {
+        throw createHttpError(
+          400,
+          `Insufficient stock for product ${produit.nom} / ${getVariantLabel(variant)}.`
+        );
+      }
+
+      await adjustVariantAndAggregateStock(tx, {
         organisationId,
-        productId: item.productId,
+        productId: line.produitId,
+        variantId: line.varianteId,
         storeId,
-        quantity: -item.quantity,
+        quantityDelta: -line.quantite,
         type: "SALE",
-        reason: `Sale ${createdSale.numeroTicket}`,
+        reason: `Sale ${createdSale.numeroTicket} - ${getVariantLabel(variant)}`,
       });
     }
 
@@ -1579,23 +2358,65 @@ const createSale = async (req, res) => {
       });
     }
 
-    return tx.vente.findUnique({
-      where: { id: createdSale.id },
-      select: {
-        id: true,
-        numeroTicket: true,
-        total: true,
-        paymentMethod: true,
-        status: true,
-        createdAt: true,
-        pointDeVenteId: true,
-        caisseId: true,
-        utilisateurId: true,
-        clientId: true,
-        client: true,
+    await tx.sessionCaisse.update({
+      where: {
+        id: sessionCaisse.id,
+      },
+      data: {
+        totalVentes: {
+          increment: total,
+        },
+        nombreTickets: {
+          increment: 1,
+        },
       },
     });
-    });
+
+        return tx.vente.findUnique({
+          where: { id: createdSale.id },
+          select: {
+            id: true,
+            numeroTicket: true,
+            total: true,
+            paymentMethod: true,
+            paidAmount: true,
+            remainingAmount: true,
+            paymentStatus: true,
+            status: true,
+            createdAt: true,
+            pointDeVenteId: true,
+            caisseId: true,
+            utilisateurId: true,
+            clientId: true,
+            sessionCaisseId: true,
+            sessionCaisse: {
+              select: {
+                id: true,
+                numeroSession: true,
+                statut: true,
+                totalVentes: true,
+                nombreTickets: true,
+                dateOuverture: true,
+                dateFermeture: true,
+              },
+            },
+            client: {
+              include: {
+                compte: true,
+              },
+            },
+          },
+        });
+        });
+        break;
+      } catch (error) {
+        if (error.code === "P2002" && attempt < 2) {
+          continue;
+        }
+
+        throw error;
+      }
+    }
 
     return res.status(201).json({
       id: sale.id,
@@ -1603,16 +2424,28 @@ const createSale = async (req, res) => {
       storeId: sale.pointDeVenteId,
       cashRegisterId: sale.caisseId,
       userId: sale.utilisateurId,
-      customerId: sale.clientId,
+      customerId: sale.client?.compte?.id || sale.clientId,
       customerNumber: sale.client ? sale.client.numeroClient : null,
-      customerName: sale.client ? sale.client.nom : null,
+      customerName: sale.client?.compte?.nom || sale.client?.nom || null,
       customerCredit: sale.client ? decimalToNumber(sale.client.credit) : 0,
       total: decimalToNumber(sale.total),
       paymentMethod: sale.paymentMethod,
+      paidAmount: decimalToNumber(sale.paidAmount),
+      remainingAmount: decimalToNumber(sale.remainingAmount),
+      paymentStatus: sale.paymentStatus,
       status: sale.status,
       createdAt: sale.createdAt,
+      sessionId: sale.sessionCaisseId,
+      sessionNumber: sale.sessionCaisse?.numeroSession || null,
+      sessionStatus: sale.sessionCaisse?.statut || null,
     });
   } catch (error) {
+    console.error("Create sale error:", {
+      message: error.message,
+      code: error.code || error.errorCode || null,
+      status: error.status || error.statusCode || null,
+      details: error.details || null,
+    });
     throw error;
   }
 };
@@ -1623,9 +2456,14 @@ const getSales = async (req, res) => {
   const paymentMethodFilter = requestedPaymentMethod
     ? normalizePaymentMethod(requestedPaymentMethod)
     : null;
+  const singleStoreContext =
+    req.user.role === "ADMIN" ? await getSingleStoreContext(organisationId) : null;
 
   if (requestedPaymentMethod && !paymentMethodFilter) {
-    throw createHttpError(400, "paymentMethod must be one of: cash, card, credit.");
+    throw createHttpError(
+      400,
+      "paymentMethod must be one of: cash, card, credit, partial."
+    );
   }
 
   const where = {
@@ -1634,7 +2472,14 @@ const getSales = async (req, res) => {
       ? {
           utilisateurId: req.user.id,
         }
-      : {}),
+      : {
+          ...(singleStoreContext?.store?.id
+            ? { pointDeVenteId: singleStoreContext.store.id }
+            : {}),
+          ...(singleStoreContext?.cashRegister?.id
+            ? { caisseId: singleStoreContext.cashRegister.id }
+            : {}),
+        }),
     ...(paymentMethodFilter
       ? {
           paymentMethod: paymentMethodFilter,
@@ -1665,7 +2510,22 @@ const getSales = async (req, res) => {
             nom: true,
           },
         },
-        client: true,
+        client: {
+          include: {
+            compte: true,
+          },
+        },
+        sessionCaisse: {
+          select: {
+            id: true,
+            numeroSession: true,
+            statut: true,
+            dateOuverture: true,
+            dateFermeture: true,
+            totalVentes: true,
+            nombreTickets: true,
+          },
+        },
         lignes: {
           orderBy: {
             id: "asc",
@@ -1675,6 +2535,16 @@ const getSales = async (req, res) => {
               select: {
                 id: true,
                 nom: true,
+                prixAchat: true,
+              },
+            },
+            variante: {
+              select: {
+                id: true,
+                taille: true,
+                couleur: true,
+                codeBarres: true,
+                prixAchat: true,
               },
             },
           },
@@ -1683,6 +2553,7 @@ const getSales = async (req, res) => {
           select: {
             id: true,
             produitId: true,
+            varianteId: true,
             quantite: true,
             raison: true,
             createdAt: true,
@@ -1700,13 +2571,27 @@ const getSales = async (req, res) => {
   return res.status(200).json(
     buildPaginatedResponse({
       data: sales.map((sale) => {
-        const returnedQuantities = buildReturnedQuantitiesMap(sale.retours);
+        const returnedQuantities = buildReturnedVariantQuantitiesMap(sale.retours);
+        const total = decimalToNumber(sale.total);
+        const type = total < 0 ? "refund" : "sale";
+        const totalPurchase = sale.lignes.reduce(
+          (sum, ligne) => sum.plus(getLineTotalPurchase(ligne)),
+          new Prisma.Decimal(0)
+        );
+        const net = sale.lignes.reduce(
+          (sum, ligne) => sum.plus(getLineNetProfit(ligne)),
+          new Prisma.Decimal(0)
+        );
 
         return {
           id: sale.id,
           ticketNumber: sale.numeroTicket,
           date: sale.dateVente,
+          type,
           paymentMethod: sale.paymentMethod,
+          paidAmount: decimalToNumber(sale.paidAmount),
+          remainingAmount: decimalToNumber(sale.remainingAmount),
+          paymentStatus: sale.paymentStatus,
           status: sale.status,
           storeId: sale.pointDeVenteId,
           storeName: sale.pointDeVente ? sale.pointDeVente.nom : "",
@@ -1714,28 +2599,51 @@ const getSales = async (req, res) => {
           cashRegisterName: sale.caisse ? sale.caisse.nom : "",
           userId: sale.utilisateurId,
           cashierName: sale.utilisateur ? sale.utilisateur.nom : "",
-          customerId: sale.clientId || 1,
+          customerId: sale.client?.compte?.id || sale.clientId || 1,
           customerNumber: sale.client ? sale.client.numeroClient : 1,
-          customerName: sale.client ? sale.client.nom : "Client inconnu",
+          customerName:
+            sale.client?.compte?.nom || sale.client?.nom || "Client inconnu",
           customerCredit: sale.client ? decimalToNumber(sale.client.credit) : 0,
+          sessionId: sale.sessionCaisseId,
+          sessionNumber: sale.sessionCaisse?.numeroSession || null,
+          sessionStatus: sale.sessionCaisse?.statut || null,
+          sessionOpenedAt: sale.sessionCaisse?.dateOuverture || null,
+          sessionClosedAt: sale.sessionCaisse?.dateFermeture || null,
           itemsCount: sale.lignes.reduce(
             (totalItems, ligne) => totalItems + ligne.quantite,
             0
           ),
-          total: decimalToNumber(sale.total),
+          total,
+          totalPurchase: decimalToNumber(totalPurchase),
+          net: decimalToNumber(net),
           returns: sale.retours.map((retour) => ({
             id: retour.id,
             produitId: retour.produitId,
+            varianteId: retour.varianteId,
             quantity: retour.quantite,
             reason: retour.raison,
             createdAt: retour.createdAt,
           })),
           items: sale.lignes.map((ligne) => {
-            const returnedQuantity = returnedQuantities.get(ligne.produitId) || 0;
+            const returnedQuantity =
+              returnedQuantities.get(
+                buildProductVariantKey(ligne.produitId, ligne.varianteId)
+              ) || 0;
 
             return {
               productId: ligne.produitId,
+              variantId: ligne.varianteId,
               productName: ligne.produit ? ligne.produit.nom : "",
+              purchasePrice:
+                ligne.variante?.prixAchat === null || ligne.variante?.prixAchat === undefined
+                  ? decimalToNumber(ligne.produit?.prixAchat)
+                  : decimalToNumber(ligne.variante.prixAchat),
+              variant: ligne.variante
+                ? buildVariantSummary(ligne.variante)
+                : null,
+              variantSize: ligne.variante ? getVariantSize(ligne.variante) : null,
+              variantColor: ligne.variante ? getVariantColor(ligne.variante) : null,
+              variantLabel: ligne.variante ? getVariantLabel(ligne.variante) : null,
               quantity: ligne.quantite,
               returnedQuantity,
               remainingReturnQuantity: Math.max(ligne.quantite - returnedQuantity, 0),
@@ -1770,10 +2678,17 @@ const cancelSale = async (req, res) => {
         lignes: {
           select: {
             produitId: true,
+            varianteId: true,
             quantite: true,
+            prixUnitaire: true,
           },
         },
         retours: {
+          select: {
+            id: true,
+          },
+        },
+        sessionCaisse: {
           select: {
             id: true,
           },
@@ -1804,10 +2719,18 @@ const cancelSale = async (req, res) => {
       await restoreStockForProduct(tx, {
         organisationId,
         productId: ligne.produitId,
+        variantId: ligne.varianteId,
         storeId: existingSale.pointDeVenteId,
         quantity: ligne.quantite,
         type: "CANCEL",
         reason: `Sale cancelled ${existingSale.numeroTicket}`,
+      });
+    }
+
+    if (existingSale.sessionCaisse?.id) {
+      await recalculateCashSessionMetrics(tx, {
+        organisationId,
+        sessionId: existingSale.sessionCaisse.id,
       });
     }
 
@@ -1831,87 +2754,399 @@ const cancelSale = async (req, res) => {
 };
 
 const returnSale = async (req, res) => {
-  const organisationId = getOrganisationIdFromUser(req.user);
   const saleId = parsePositiveInteger(req.params.id);
 
   if (Number.isNaN(saleId)) {
     throw createHttpError(400, "sale id must be a valid positive integer.");
   }
 
-  const items = normalizeReturnItems(req.body.items);
-  const reason = normalizeOptionalString(req.body.reason);
+  req.body = {
+    ...(req.body && typeof req.body === "object" ? req.body : {}),
+    saleId,
+    venteId: saleId,
+    reason: req.body?.reason ?? req.body?.motif,
+    motif: req.body?.motif ?? req.body?.reason,
+  };
 
-  const sale = await prisma.$transaction(async (tx) => {
-    const existingSale = await tx.vente.findFirst({
+  return createRefund(req, res);
+};
+
+const createRefund = async (req, res) => {
+  const organisationId = getOrganisationIdFromUser(req.user);
+
+  validateSchema(refundCreateSchema, {
+    saleId: getAliasedValue(req.body, "saleId", "venteId"),
+    customerId: getAliasedValue(req.body, "customerId", "clientId"),
+    paymentMethod: req.body.paymentMethod,
+    items: Array.isArray(req.body.items)
+      ? req.body.items.map((item) => ({
+          productId: getAliasedValue(item, "productId", "produitId"),
+          variantId: getAliasedValue(item, "variantId", "varianteId"),
+          quantity: getAliasedValue(item, "quantity", "quantite"),
+          unitPrice: getAliasedValue(item, "unitPrice", "prixUnitaire"),
+        }))
+      : req.body.items,
+    reason: req.body.reason ?? req.body.motif,
+  });
+
+  const requestedSaleId = parseOptionalPositiveInteger(
+    getAliasedValue(req.body, "saleId", "venteId")
+  );
+  const requestedCustomerId = parseOptionalPositiveInteger(
+    getAliasedValue(req.body, "customerId", "clientId")
+  );
+
+  if (Number.isNaN(requestedSaleId)) {
+    throw createHttpError(400, "saleId must be a valid positive integer.");
+  }
+
+  if (Number.isNaN(requestedCustomerId)) {
+    throw createHttpError(400, "customerId must be a valid positive integer.");
+  }
+
+  const items = normalizeRefundItems(req.body.items);
+  const reason = normalizeOptionalString(req.body.reason ?? req.body.motif);
+  const requestedPaymentMethod = normalizeOptionalString(req.body.paymentMethod);
+  const fallbackPaymentMethod = requestedPaymentMethod
+    ? normalizePaymentMethod(requestedPaymentMethod)
+    : "cash";
+  const isEmployee = req.user.role === "EMPLOYE";
+  const employeeStoreId = getEmployeeStoreId(req.user);
+  const employeeCashRegisterId = getEmployeeCashRegisterId(req.user);
+  const singleStoreContext = !isEmployee
+    ? await getSingleStoreContext(organisationId)
+    : null;
+  const fallbackStoreId = isEmployee
+    ? employeeStoreId
+    : singleStoreContext?.store?.id || null;
+  const fallbackCashRegisterId = isEmployee
+    ? employeeCashRegisterId
+    : singleStoreContext?.cashRegister?.id || null;
+  const userId = req.user.id;
+
+  if (requestedPaymentMethod && !fallbackPaymentMethod) {
+    throw createHttpError(
+      400,
+      "paymentMethod must be one of: cash, card, credit, partial, transfer, mobile_money."
+    );
+  }
+
+  console.info("REFUND START", {
+    organisationId,
+    saleId: requestedSaleId,
+    requestedCustomerId,
+    requestedPaymentMethod,
+    items,
+    reason,
+    userId,
+  });
+
+  if (isEmployee && (!employeeStoreId || !employeeCashRegisterId)) {
+    throw createHttpError(
+      403,
+      "Employees can only create refunds when assigned to both a store and a cash register."
+    );
+  }
+
+  if (!fallbackStoreId) {
+    throw createHttpError(400, "No default store found for the refund.");
+  }
+
+  if (!fallbackCashRegisterId) {
+    throw createHttpError(400, "No default cash register found for the refund.");
+  }
+
+  const refundResult = await prisma.$transaction(async (tx) => {
+    let linkedSale = null;
+    let soldQuantities = new Map();
+    let returnedQuantities = new Map();
+    let saleItemsByLineKey = new Map();
+    let paymentMethod = fallbackPaymentMethod;
+
+    if (requestedSaleId) {
+      linkedSale = await tx.vente.findFirst({
+        where: {
+          organisationId,
+          id: requestedSaleId,
+        },
+        include: {
+          lignes: {
+            select: {
+              produitId: true,
+              varianteId: true,
+              quantite: true,
+              prixUnitaire: true,
+            },
+          },
+          retours: {
+            select: {
+              produitId: true,
+              varianteId: true,
+              quantite: true,
+            },
+          },
+        },
+      });
+
+      if (!linkedSale) {
+        throw createHttpError(404, "Sale not found.");
+      }
+
+      console.info("REFUND original sale found", {
+        saleId: linkedSale.id,
+        ticketNumber: linkedSale.numeroTicket,
+        total: decimalToNumber(linkedSale.total),
+        paymentMethod: linkedSale.paymentMethod,
+      });
+
+      if (linkedSale.status === "cancelled") {
+        throw createHttpError(400, "A cancelled sale cannot be refunded.");
+      }
+
+      if (!requestedPaymentMethod) {
+        paymentMethod = normalizePaymentMethod(linkedSale.paymentMethod) || fallbackPaymentMethod;
+      }
+
+      soldQuantities = new Map(
+        linkedSale.lignes.map((ligne) => [
+          buildProductVariantKey(ligne.produitId, ligne.varianteId),
+          ligne.quantite,
+        ])
+      );
+      returnedQuantities = buildReturnedVariantQuantitiesMap(linkedSale.retours);
+      saleItemsByLineKey = new Map(
+        linkedSale.lignes.map((ligne) => [
+          buildProductVariantKey(ligne.produitId, ligne.varianteId),
+          ligne,
+        ])
+      );
+    }
+
+    const productIds = [...new Set(items.map((item) => item.productId))];
+    const produits = await tx.produit.findMany({
       where: {
         organisationId,
-        id: saleId,
+        id: {
+          in: productIds,
+        },
       },
-      include: {
-        lignes: {
-          select: {
-            produitId: true,
-            quantite: true,
-          },
-        },
-        retours: {
-          select: {
-            produitId: true,
-            quantite: true,
-          },
-        },
+      select: {
+        id: true,
+        nom: true,
+        prixVente: true,
+        prixAchat: true,
+        prixDetail: true,
+        estActif: true,
       },
     });
 
-    if (!existingSale) {
-      throw createHttpError(404, "Sale not found.");
+    if (produits.length !== productIds.length) {
+      const foundProductIds = new Set(produits.map((produit) => produit.id));
+      const missingProductIds = productIds.filter((id) => !foundProductIds.has(id));
+      throw createHttpError(404, `Products not found: ${missingProductIds.join(", ")}.`);
     }
 
-    if (req.user.role === "EMPLOYE" && existingSale.utilisateurId !== req.user.id) {
-      throw createHttpError(403, "Employees can only return their own sales.");
+    const productMap = new Map(produits.map((produit) => [produit.id, produit]));
+    const variants = await tx.produitVariante.findMany({
+      where: {
+        organisationId,
+        produitId: { in: productIds },
+      },
+    });
+    const variantsByProductId = variants.reduce((map, variant) => {
+      const currentVariants = map.get(variant.produitId) || [];
+      currentVariants.push(variant);
+      map.set(variant.produitId, currentVariants);
+      return map;
+    }, new Map());
+    const createdRefunds = [];
+    const lignesData = [];
+    const storeId = linkedSale?.pointDeVenteId || fallbackStoreId;
+    let refundTotal = new Prisma.Decimal(0);
+
+    const pointDeVente = await tx.pointDeVente.findFirst({
+      where: {
+        organisationId,
+        id: storeId,
+      },
+      select: {
+        id: true,
+      },
+    });
+
+    if (!pointDeVente) {
+      throw createHttpError(404, "Store not found.");
     }
 
-    if (existingSale.status === "cancelled") {
-      throw createHttpError(400, "A cancelled sale cannot be returned.");
+    const caisse = await tx.caisse.findFirst({
+      where: {
+        organisationId,
+        id: fallbackCashRegisterId,
+      },
+      select: {
+        id: true,
+        nom: true,
+        code: true,
+        pointDeVenteId: true,
+        estActive: true,
+      },
+    });
+
+    if (!caisse) {
+      throw createHttpError(404, "Cash register not found.");
     }
 
-    if (existingSale.status === "refunded") {
-      throw createHttpError(400, "This sale is already fully refunded.");
+    if (caisse.pointDeVenteId !== storeId) {
+      throw createHttpError(
+        400,
+        "The selected cash register does not belong to the selected store."
+      );
     }
 
-    const soldQuantities = new Map(
-      existingSale.lignes.map((ligne) => [ligne.produitId, ligne.quantite])
-    );
-    const returnedQuantities = buildReturnedQuantitiesMap(existingSale.retours);
+    if (!caisse.estActive) {
+      throw createHttpError(400, "The selected cash register is inactive.");
+    }
+
+    const utilisateur = await tx.utilisateur.findFirst({
+      where: {
+        organisationId,
+        id: userId,
+      },
+      select: {
+        id: true,
+        role: true,
+        estActif: true,
+        pointDeVenteId: true,
+        caisseId: true,
+      },
+    });
+
+    if (!utilisateur) {
+      throw createHttpError(404, "User not found.");
+    }
+
+    if (!utilisateur.estActif) {
+      throw createHttpError(400, "Cannot create a refund with an inactive user.");
+    }
+
+    if (utilisateur.role === "EMPLOYE" && utilisateur.pointDeVenteId !== storeId) {
+      throw createHttpError(400, "This employee does not belong to the selected store.");
+    }
+
+    if (
+      utilisateur.role === "EMPLOYE" &&
+      utilisateur.caisseId !== fallbackCashRegisterId
+    ) {
+      throw createHttpError(
+        400,
+        "This employee does not belong to the selected cash register."
+      );
+    }
+
+    let customerId = linkedSale?.clientId || null;
+
+    if (requestedCustomerId !== null) {
+      const customerCompte = await resolveCustomerCompte(
+        tx,
+        organisationId,
+        requestedCustomerId
+      );
+      customerId = customerCompte.clientSource.id;
+    } else if (!customerId) {
+      const defaultCustomerCompte = await getDefaultCustomerCompte(req.user, tx);
+      customerId = defaultCustomerCompte.clientSource.id;
+    }
+
+    const sessionCaisse = await ensureOpenCashSession(tx, {
+      organisationId,
+      caisseId: fallbackCashRegisterId,
+      pointDeVenteId: storeId,
+      utilisateurId: userId,
+      cashRegisterCode: caisse.code,
+      date: new Date(),
+    });
 
     for (const item of items) {
-      const soldQuantity = soldQuantities.get(item.productId);
+      const product = productMap.get(item.productId);
+      const variant = ensureResolvedVariant({
+        item,
+        product,
+        variantsByProductId,
+      });
+      const itemKey = buildProductVariantKey(item.productId, variant.id);
+      let unitPriceValue = item.unitPrice;
 
-      if (!soldQuantity) {
-        throw createHttpError(
-          400,
-          `Product ${item.productId} is not part of this sale.`
+      if (linkedSale) {
+        const soldQuantity = soldQuantities.get(itemKey);
+
+        if (!soldQuantity) {
+          throw createHttpError(
+            400,
+            `Product ${item.productId} is not part of this sale.`
+          );
+        }
+
+        const alreadyReturnedQuantity = returnedQuantities.get(itemKey) || 0;
+        const remainingQuantity = soldQuantity - alreadyReturnedQuantity;
+
+        if (item.quantity > remainingQuantity) {
+          throw createHttpError(
+            400,
+            `Refund quantity exceeds remaining sold quantity for product ${item.productId}.`
+          );
+        }
+
+        const saleItem = saleItemsByLineKey.get(itemKey);
+        if (unitPriceValue === null || unitPriceValue === undefined) {
+          unitPriceValue = decimalToNumber(saleItem?.prixUnitaire ?? product.prixVente);
+        }
+      } else if (unitPriceValue === null || unitPriceValue === undefined) {
+        unitPriceValue = decimalToNumber(
+          variant.prixVente ?? product.prixVente ?? product.prixDetail
         );
       }
 
-      const alreadyReturnedQuantity = returnedQuantities.get(item.productId) || 0;
-      const remainingQuantity = soldQuantity - alreadyReturnedQuantity;
+      const lineUnitPrice = new Prisma.Decimal(unitPriceValue);
+      const lineTotal = lineUnitPrice.mul(item.quantity);
 
-      if (item.quantity > remainingQuantity) {
-        throw createHttpError(
-          400,
-          `Return quantity exceeds remaining sold quantity for product ${item.productId}.`
-        );
-      }
-    }
+      console.info("REFUND lines", {
+        saleId: linkedSale?.id || null,
+        productId: item.productId,
+        variantId: variant.id,
+        quantity: item.quantity,
+        unitPrice: decimalToNumber(lineUnitPrice),
+        lineTotal: decimalToNumber(lineTotal),
+      });
 
-    for (const item of items) {
-      await tx.retour.create({
+      refundTotal = refundTotal.plus(lineTotal);
+      lignesData.push({
+        organisationId,
+        produitId: item.productId,
+        varianteId: variant.id,
+        quantite: item.quantity,
+        prixUnitaire: lineUnitPrice.mul(-1),
+        sousTotal: lineTotal.mul(-1),
+      });
+
+      const numero = await buildAnnualDocumentNumber({
+        tx,
+        model: "retour",
+        field: "numero",
+        where: {
+          organisationId,
+        },
+        date: new Date(),
+      });
+
+      const refund = await tx.retour.create({
         data: {
           organisationId,
-          venteId: existingSale.id,
+          numero,
+          venteId: linkedSale?.id || null,
           produitId: item.productId,
+          varianteId: variant.id,
           quantite: item.quantity,
+          montant: lineTotal,
           raison: reason,
         },
       });
@@ -1919,39 +3154,144 @@ const returnSale = async (req, res) => {
       await restoreStockForProduct(tx, {
         organisationId,
         productId: item.productId,
-        storeId: existingSale.pointDeVenteId,
+        variantId: variant.id,
+        storeId,
         quantity: item.quantity,
         type: "RETURN",
-        reason: reason || `Sale return ${existingSale.numeroTicket}`,
+        reason:
+          reason || `Remboursement ${numero} - ${product.nom} / ${getVariantLabel(variant)}`,
       });
 
-      returnedQuantities.set(
-        item.productId,
-        (returnedQuantities.get(item.productId) || 0) + item.quantity
-      );
+      console.info("REFUND stock increased", {
+        productId: item.productId,
+        variantId: variant.id,
+        storeId,
+        quantity: item.quantity,
+      });
+
+      if (linkedSale) {
+        returnedQuantities.set(itemKey, (returnedQuantities.get(itemKey) || 0) + item.quantity);
+      }
+
+      createdRefunds.push({
+        id: refund.id,
+        numero: refund.numero,
+        venteId: refund.venteId,
+        produitId: refund.produitId,
+        varianteId: refund.varianteId,
+        quantite: refund.quantite,
+        montant: decimalToNumber(refund.montant),
+        motif: refund.raison,
+        createdAt: refund.createdAt,
+      });
     }
 
-    const isFullyReturned = existingSale.lignes.every((ligne) => {
-      const returnedQuantity = returnedQuantities.get(ligne.produitId) || 0;
-      return returnedQuantity >= ligne.quantite;
+    const negativeRefundTotal = refundTotal.mul(-1);
+    const numeroTicket = await buildAnnualDocumentNumber({
+      tx,
+      model: "vente",
+      field: "numeroTicket",
+      date: new Date(),
     });
-
-    return tx.vente.update({
-      where: { id: saleId },
+    const refundSale = await tx.vente.create({
       data: {
-        status: isFullyReturned ? "refunded" : existingSale.status,
+        organisationId,
+        numeroTicket,
+        total: negativeRefundTotal,
+        paymentMethod,
+        paidAmount: new Prisma.Decimal(0),
+        remainingAmount: new Prisma.Decimal(0),
+        paymentStatus: "REFUNDED",
+        status: "refunded",
+        pointDeVenteId: storeId,
+        caisseId: fallbackCashRegisterId,
+        utilisateurId: userId,
+        clientId: customerId,
+        sessionCaisseId: sessionCaisse.id,
+        lignes: {
+          create: lignesData,
+        },
       },
       select: {
         id: true,
         numeroTicket: true,
+        total: true,
+        paymentMethod: true,
+        paidAmount: true,
+        remainingAmount: true,
+        paymentStatus: true,
         status: true,
+        createdAt: true,
       },
     });
+
+    console.info("REFUND new refund sale created", {
+      refundSaleId: refundSale.id,
+      ticketNumber: refundSale.numeroTicket,
+      total: decimalToNumber(refundSale.total),
+      linkedSaleId: linkedSale?.id || null,
+    });
+
+    await tx.sessionCaisse.update({
+      where: {
+        id: sessionCaisse.id,
+      },
+      data: {
+        totalVentes: {
+          increment: negativeRefundTotal,
+        },
+        nombreTickets: {
+          increment: 1,
+        },
+      },
+    });
+
+    if (linkedSale) {
+      const isFullyReturned = linkedSale.lignes.every((ligne) => {
+        const returnedQuantity =
+          returnedQuantities.get(buildProductVariantKey(ligne.produitId, ligne.varianteId)) ||
+          0;
+        return returnedQuantity >= ligne.quantite;
+      });
+
+      await tx.vente.update({
+        where: { id: linkedSale.id },
+        data: {
+          status: isFullyReturned ? "refunded" : linkedSale.status,
+        },
+      });
+    }
+
+    return {
+      refundSale: {
+        id: refundSale.id,
+        ticketNumber: refundSale.numeroTicket,
+        total: decimalToNumber(refundSale.total),
+        paymentMethod: refundSale.paymentMethod,
+        paidAmount: decimalToNumber(refundSale.paidAmount),
+        remainingAmount: decimalToNumber(refundSale.remainingAmount),
+        paymentStatus: refundSale.paymentStatus,
+        status: refundSale.status,
+        createdAt: refundSale.createdAt,
+      },
+      refunds: createdRefunds,
+      originalSale: linkedSale
+        ? {
+            id: linkedSale.id,
+            ticketNumber: linkedSale.numeroTicket,
+          }
+        : null,
+    };
   });
 
-  return res.status(200).json({
-    message: "Sale return processed successfully.",
-    sale,
+  return res.status(201).json({
+    success: true,
+    message: "Refund processed successfully.",
+    refund: refundResult.refunds[0] || null,
+    sale: refundResult.refundSale,
+    refundSale: refundResult.refundSale,
+    refunds: refundResult.refunds,
+    originalSale: refundResult.originalSale,
   });
 };
 
@@ -1962,6 +3302,7 @@ const getCustomers = async (req, res) => {
   const where = search
     ? {
         organisationId,
+        type: COMPTE_TYPES.CLIENT,
         OR: [
           {
             nom: {
@@ -1981,10 +3322,18 @@ const getCustomers = async (req, res) => {
               mode: "insensitive",
             },
           },
+          {
+            numeroCompte: {
+              contains: search,
+              mode: "insensitive",
+            },
+          },
           ...(!Number.isNaN(numericSearch) && Number.isInteger(numericSearch)
             ? [
                 {
-                  numeroClient: numericSearch,
+                  clientSource: {
+                    numeroClient: numericSearch,
+                  },
                 },
               ]
             : []),
@@ -1992,23 +3341,13 @@ const getCustomers = async (req, res) => {
       }
     : {
         organisationId,
+        type: COMPTE_TYPES.CLIENT,
       };
 
-  const customers = await prisma.client.findMany({
+  const customers = await prisma.compte.findMany({
     where,
-    include: {
-      ventes: {
-        select: {
-          total: true,
-        },
-      },
-      _count: {
-        select: {
-          ventes: true,
-        },
-      },
-    },
-    orderBy: [{ numeroClient: "asc" }, { id: "asc" }],
+    include: compteInclude,
+    orderBy: [{ id: "asc" }],
   });
 
   return res.status(200).json(customers.map(buildCustomerSummary));
@@ -2021,30 +3360,21 @@ const createCustomer = async (req, res) => {
       name: req.body.name || req.body.nom,
       phone: req.body.phone || req.body.telephone,
       email: req.body.email,
+      address: req.body.address || req.body.adresse,
     });
     const nom = normalizeRequiredString(parsedInput.name);
     const telephone = normalizeOptionalString(parsedInput.phone);
     const email = normalizeOptionalString(parsedInput.email);
+    const adresse = normalizeOptionalString(parsedInput.address);
 
     const newCustomer = await prisma.$transaction(async (tx) => {
-      await getDefaultCustomer(req.user, tx);
-
-      const lastCustomer = await tx.client.findFirst({
-        where: {
-          organisationId,
-          numeroClient: {
-            gt: 1,
-          },
-        },
-        orderBy: {
-          numeroClient: "desc",
-        },
-        select: {
-          numeroClient: true,
-        },
-      });
-
-      const nextNumero = lastCustomer ? lastCustomer.numeroClient + 1 : 2;
+      await getDefaultCustomerCompte(req.user, tx);
+      const nextNumero = await buildNextNumeroClient(tx, organisationId);
+      const numeroCompte = await buildNextNumeroCompte(
+        tx,
+        organisationId,
+        COMPTE_TYPES.CLIENT
+      );
 
       if (nextNumero <= 1) {
         throw createHttpError(
@@ -2053,7 +3383,7 @@ const createCustomer = async (req, res) => {
         );
       }
 
-      return tx.client.create({
+      const client = await tx.client.create({
         data: {
           organisationId,
           numeroClient: nextNumero,
@@ -2063,6 +3393,21 @@ const createCustomer = async (req, res) => {
           credit: 0,
           estActif: true,
         },
+      });
+
+      return tx.compte.create({
+        data: {
+          organisationId,
+          numeroCompte,
+          type: COMPTE_TYPES.CLIENT,
+          nom: nom.trim(),
+          telephone: telephone || null,
+          email: email || null,
+          adresse: adresse || null,
+          actif: true,
+          clientSourceId: client.id,
+        },
+        include: compteInclude,
       });
     });
 
@@ -2084,12 +3429,7 @@ const getCustomerCredit = async (req, res) => {
     throw createHttpError(400, "customer id must be a valid positive integer.");
   }
 
-  const customer = await prisma.client.findFirst({
-    where: {
-      organisationId,
-      id: customerId,
-    },
-  });
+  const customer = await resolveCustomerCompte(prisma, organisationId, customerId);
 
   if (!customer) {
     throw createHttpError(404, "Customer not found.");
@@ -2097,9 +3437,9 @@ const getCustomerCredit = async (req, res) => {
 
   return res.status(200).json({
     customerId: customer.id,
-    customerNumber: customer.numeroClient,
+    customerNumber: customer.clientSource.numeroClient,
     name: customer.nom,
-    credit: decimalToNumber(customer.credit),
+    credit: decimalToNumber(customer.clientSource.credit),
   });
 };
 
@@ -2111,25 +3451,30 @@ const getCustomerById = async (req, res) => {
     throw createHttpError(400, "customer id must be a valid positive integer.");
   }
 
-  const customer = await prisma.client.findFirst({
+  const customer = await prisma.compte.findFirst({
     where: {
       organisationId,
       id: customerId,
+      type: COMPTE_TYPES.CLIENT,
     },
     include: {
-      ventes: {
-        select: {
-          total: true,
-        },
-      },
-      paiements: {
-        orderBy: {
-          createdAt: "desc",
-        },
-      },
-      _count: {
-        select: {
-          ventes: true,
+      clientSource: {
+        include: {
+          ventes: {
+            select: {
+              total: true,
+            },
+          },
+          paiements: {
+            orderBy: {
+              createdAt: "desc",
+            },
+          },
+          _count: {
+            select: {
+              ventes: true,
+            },
+          },
         },
       },
     },
@@ -2141,7 +3486,7 @@ const getCustomerById = async (req, res) => {
 
   return res.status(200).json({
     ...buildCustomerSummary(customer),
-    paymentHistory: (customer.paiements || []).map(toApiCustomerPayment),
+    paymentHistory: (customer.clientSource?.paiements || []).map(toApiCustomerPayment),
   });
 };
 
@@ -2153,24 +3498,12 @@ const getCustomerSales = async (req, res) => {
     throw createHttpError(400, "customer id must be a valid positive integer.");
   }
 
-  const customer = await prisma.client.findFirst({
-    where: {
-      organisationId,
-      id: customerId,
-    },
-    select: {
-      id: true,
-    },
-  });
-
-  if (!customer) {
-    throw createHttpError(404, "Customer not found.");
-  }
+  const customer = await resolveCustomerCompte(prisma, organisationId, customerId);
 
   const sales = await prisma.vente.findMany({
     where: {
       organisationId,
-      clientId: customerId,
+      clientId: customer.clientSource.id,
     },
     include: {
       pointDeVente: {
@@ -2220,18 +3553,9 @@ const payCustomerCredit = async (req, res) => {
   const note = normalizeOptionalString(parsedInput.note);
 
   const updatedCustomer = await prisma.$transaction(async (tx) => {
-    const customer = await tx.client.findFirst({
-      where: {
-        organisationId,
-        id: customerId,
-      },
-    });
+    const customer = await resolveCustomerCompte(tx, organisationId, customerId);
 
-    if (!customer) {
-      throw createHttpError(404, "Customer not found.");
-    }
-
-    if (new Prisma.Decimal(customer.credit).lessThan(amount)) {
+    if (new Prisma.Decimal(customer.clientSource.credit).lessThan(amount)) {
       throw createHttpError(
         400,
         "amount cannot be greater than the current customer credit."
@@ -2241,39 +3565,191 @@ const payCustomerCredit = async (req, res) => {
     await tx.paiementClient.create({
       data: {
         organisationId,
-        clientId: customer.id,
+        clientId: customer.clientSource.id,
         montant: amount,
         note: note || "Paiement credit",
       },
     });
 
-    return tx.client.update({
+    await tx.client.update({
       where: {
-        id: customer.id,
+        id: customer.clientSource.id,
       },
       data: {
         credit: {
           decrement: amount,
         },
       },
-      include: {
-        ventes: {
-          select: {
-            total: true,
-          },
-        },
-        _count: {
-          select: {
-            ventes: true,
-          },
-        },
+    });
+
+    return tx.compte.findFirst({
+      where: {
+        organisationId,
+        id: customer.id,
+        type: COMPTE_TYPES.CLIENT,
       },
+      include: compteInclude,
     });
   });
 
   return res.status(200).json({
     message: "Customer credit updated successfully.",
     customer: buildCustomerSummary(updatedCustomer),
+  });
+};
+
+const addSalePayment = async (req, res) => {
+  const organisationId = getOrganisationIdFromUser(req.user);
+  const saleId = parsePositiveInteger(req.params.id);
+
+  if (Number.isNaN(saleId)) {
+    throw createHttpError(400, "sale id must be a valid positive integer.");
+  }
+
+  const parsedInput = validateSchema(salePaymentSchema, {
+    amount: req.body.amount,
+    paymentMethod: req.body.paymentMethod,
+    note: req.body.note,
+  });
+
+  const paymentMethod = normalizePaymentMethod(parsedInput.paymentMethod);
+  const note = normalizeOptionalString(parsedInput.note);
+
+  if (!["cash", "card"].includes(paymentMethod)) {
+    throw createHttpError(400, "paymentMethod must be one of: cash, card.");
+  }
+
+  const amount = new Prisma.Decimal(parsedInput.amount);
+
+  const result = await prisma.$transaction(async (tx) => {
+    const sale = await tx.vente.findFirst({
+      where: {
+        organisationId,
+        id: saleId,
+      },
+      include: {
+        client: {
+          include: {
+            compte: true,
+          },
+        },
+      },
+    });
+
+    if (!sale) {
+      throw createHttpError(404, "Sale not found.");
+    }
+
+    if (sale.status === "cancelled") {
+      throw createHttpError(400, "A cancelled sale cannot receive a payment.");
+    }
+
+    if (sale.status === "refunded" || new Prisma.Decimal(sale.total).lessThan(0)) {
+      throw createHttpError(400, "A refund cannot receive a payment.");
+    }
+
+    if (!["partial", "credit"].includes(sale.paymentMethod)) {
+      throw createHttpError(
+        400,
+        "Only partial or credit sales can receive an additional payment."
+      );
+    }
+
+    const currentPaidAmount = new Prisma.Decimal(sale.paidAmount || 0);
+    const currentRemainingAmount = new Prisma.Decimal(sale.remainingAmount || 0);
+
+    if (currentRemainingAmount.lessThanOrEqualTo(0)) {
+      throw createHttpError(400, "This sale is already fully paid.");
+    }
+
+    if (amount.greaterThan(currentRemainingAmount)) {
+      throw createHttpError(
+        400,
+        "amount cannot be greater than the remaining amount."
+      );
+    }
+
+    if (sale.paymentMethod === "credit" && sale.client) {
+      const customerCredit = new Prisma.Decimal(sale.client.credit || 0);
+
+      if (customerCredit.lessThan(amount)) {
+        throw createHttpError(
+          400,
+          "amount cannot be greater than the current customer credit."
+        );
+      }
+
+      await tx.client.update({
+        where: {
+          id: sale.client.id,
+        },
+        data: {
+          credit: {
+            decrement: amount,
+          },
+        },
+      });
+    }
+
+    const nextPaidAmount = currentPaidAmount.plus(amount);
+    const nextRemainingAmount = currentRemainingAmount.minus(amount);
+    const nextPaymentStatus = nextRemainingAmount.equals(0)
+      ? "PAID"
+      : "PARTIALLY_PAID";
+
+    const updatedSale = await tx.vente.update({
+      where: {
+        id: sale.id,
+      },
+      data: {
+        paidAmount: nextPaidAmount,
+        remainingAmount: nextRemainingAmount,
+        paymentStatus: nextPaymentStatus,
+      },
+      include: {
+        client: {
+          include: {
+            compte: true,
+          },
+        },
+      },
+    });
+
+    const payment = sale.clientId
+      ? await tx.paiementClient.create({
+          data: {
+            organisationId,
+            clientId: sale.clientId,
+            montant: amount,
+            note:
+              note ||
+              `Paiement ${paymentMethod === "card" ? "carte" : "especes"} sur ticket ${sale.numeroTicket}`,
+          },
+        })
+      : null;
+
+    return {
+      sale: updatedSale,
+      payment,
+    };
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: "Sale payment added successfully.",
+    sale: {
+      id: result.sale.id,
+      ticketNumber: result.sale.numeroTicket,
+      total: decimalToNumber(result.sale.total),
+      paymentMethod: result.sale.paymentMethod,
+      paidAmount: decimalToNumber(result.sale.paidAmount),
+      remainingAmount: decimalToNumber(result.sale.remainingAmount),
+      paymentStatus: result.sale.paymentStatus,
+      status: result.sale.status,
+      customerId: result.sale.client?.compte?.id || result.sale.clientId,
+      customerName: result.sale.client?.compte?.nom || result.sale.client?.nom || null,
+    },
+    payment: result.payment ? toApiCustomerPayment(result.payment) : null,
   });
 };
 
@@ -2285,51 +3761,66 @@ const deleteCustomer = async (req, res) => {
     throw createHttpError(400, "customer id must be a valid positive integer.");
   }
 
-  const customer = await prisma.client.findFirst({
+  const customer = await prisma.compte.findFirst({
     where: {
       organisationId,
       id: customerId,
+      type: COMPTE_TYPES.CLIENT,
     },
-    include: {
-      _count: {
-        select: {
-          ventes: true,
-        },
-      },
-    },
+    include: compteInclude,
   });
 
-  if (!customer) {
+  if (!customer || !customer.clientSource) {
     throw createHttpError(404, "Customer not found.");
   }
 
-  if (customer.numeroClient === 1) {
+  if (customer.clientSource.numeroClient === 1) {
     throw createHttpError(
       400,
       "Le client inconnu ne peut pas etre supprime."
     );
   }
 
-  if (customer._count.ventes > 0) {
-    const disabledCustomer = await prisma.client.update({
-      where: {
-        id: customer.id,
-      },
-      data: {
-        estActif: false,
-      },
-    });
+  if ((customer.clientSource._count?.ventes || 0) > 0) {
+    await prisma.$transaction([
+      prisma.client.update({
+        where: {
+          id: customer.clientSource.id,
+        },
+        data: {
+          estActif: false,
+        },
+      }),
+      prisma.compte.update({
+        where: {
+          id: customer.id,
+        },
+        data: {
+          actif: false,
+        },
+      }),
+    ]);
 
     return res.status(200).json({
       message: "Client desactive avec succes.",
-      customer: toApiCustomer(disabledCustomer),
+      customer: {
+        ...buildCustomerSummary(customer),
+        active: false,
+      },
     });
   }
 
-  await prisma.client.delete({
-    where: {
-      id: customer.id,
-    },
+  await prisma.$transaction(async (tx) => {
+    await tx.compte.delete({
+      where: {
+        id: customer.id,
+      },
+    });
+    await tx.client.delete({
+      where: {
+        id: customer.clientSource.id,
+      },
+    });
   });
 
   return res.status(200).json({
@@ -2339,32 +3830,18 @@ const deleteCustomer = async (req, res) => {
 
 const getSuppliers = async (req, res) => {
   const organisationId = getOrganisationIdFromUser(req.user);
-  const suppliers = await prisma.fournisseur.findMany({
+  const suppliers = await prisma.compte.findMany({
     where: {
       organisationId,
+      type: COMPTE_TYPES.FOURNISSEUR,
     },
-    include: {
-      _count: {
-        select: {
-          produits: true,
-        },
-      },
-    },
+    include: compteInclude,
     orderBy: {
       id: "desc",
     },
   });
 
-  return res.status(200).json(
-    suppliers.map((supplier) => ({
-      id: supplier.id,
-      name: supplier.nom,
-      phone: supplier.telephone,
-      email: supplier.email,
-      address: supplier.adresse,
-      productsCount: supplier._count.produits,
-    }))
-  );
+  return res.status(200).json(suppliers.map(toApiSupplierFromCompte));
 };
 
 const getReports = async (req, res) => {
@@ -2482,6 +3959,7 @@ const getAnalytics = async (req, res) => {
   const organisationId = getOrganisationIdFromUser(req.user);
   const period = normalizeRequiredString(req.query.period || "week").toLowerCase();
   const range = getAnalyticsDateRange(period);
+  const primaryStore = await getPrimaryStore(organisationId);
 
   if (!range) {
     throw createHttpError(400, "period must be one of: week, month.");
@@ -2491,6 +3969,7 @@ const getAnalytics = async (req, res) => {
     prisma.pointDeVente.findMany({
       where: {
         organisationId,
+        ...(primaryStore?.id ? { id: primaryStore.id } : {}),
       },
       select: {
         id: true,
@@ -2502,7 +3981,8 @@ const getAnalytics = async (req, res) => {
       where: {
         organisationId,
         status: "completed",
-        dateVente: {
+        ...(primaryStore?.id ? { pointDeVenteId: primaryStore.id } : {}),
+        createdAt: {
           gte: range.startDate,
           lte: range.endDate,
         },
@@ -2521,13 +4001,19 @@ const getAnalytics = async (req, res) => {
                 id: true,
                 nom: true,
                 categorie: true,
+                categorieProduit: {
+                  select: {
+                    nom: true,
+                    nomComplet: true,
+                  },
+                },
               },
             },
           },
         },
       },
       orderBy: {
-        dateVente: "asc",
+        createdAt: "asc",
       },
     }),
   ]);
@@ -2557,7 +4043,7 @@ const getAnalytics = async (req, res) => {
   for (const sale of sales) {
     totalRevenue = totalRevenue.plus(sale.total);
 
-    const saleDateKey = formatAnalyticsDateKey(sale.dateVente);
+    const saleDateKey = formatAnalyticsDateKey(sale.createdAt);
     const existingDailyRevenue =
       salesEvolutionMap.get(saleDateKey) || new Prisma.Decimal(0);
     salesEvolutionMap.set(saleDateKey, existingDailyRevenue.plus(sale.total));
@@ -2576,7 +4062,11 @@ const getAnalytics = async (req, res) => {
     for (const ligne of sale.lignes) {
       const productId = ligne.produit?.id || ligne.produitId;
       const productName = ligne.produit?.nom || "Produit";
-      const productCategory = ligne.produit?.categorie || "Sans categorie";
+      const productCategory =
+        ligne.produit?.categorieProduit?.nom ||
+        ligne.produit?.categorieProduit?.nomComplet ||
+        ligne.produit?.categorie ||
+        "Sans categorie";
       const existingProduct = topProductsMap.get(productId) || {
         name: productName,
         quantite: 0,
@@ -2666,9 +4156,21 @@ const getAnalytics = async (req, res) => {
 
 const getUsers = async (req, res) => {
   const organisationId = getOrganisationIdFromUser(req.user);
+  const { store, cashRegister } = await getSingleStoreContext(organisationId);
   const users = await prisma.utilisateur.findMany({
     where: {
       organisationId,
+      ...(store?.id && cashRegister?.id
+        ? {
+            OR: [
+              { role: "ADMIN" },
+              {
+                pointDeVenteId: store.id,
+                caisseId: cashRegister.id,
+              },
+            ],
+          }
+        : {}),
     },
     include: {
       pointDeVente: {
@@ -2707,6 +4209,8 @@ const getStores = async (req, res) => {
   const employeeStoreId = getEmployeeStoreId(req.user);
   const todayStart = getStartOfDay(new Date());
   const todayEnd = getEndOfDay(new Date());
+  const primaryStore =
+    req.user.role === "ADMIN" ? await getPrimaryStore(organisationId) : null;
 
   if (req.user.role === "EMPLOYE" && !employeeStoreId) {
     throw createHttpError(403, "Employee is not assigned to a store.");
@@ -2722,6 +4226,7 @@ const getStores = async (req, res) => {
             }
           : {
               organisationId,
+              ...(primaryStore?.id ? { id: primaryStore.id } : {}),
             },
       include: {
         _count: {
@@ -2746,7 +4251,11 @@ const getStores = async (req, res) => {
           ? {
               pointDeVenteId: employeeStoreId,
             }
-          : {}),
+          : primaryStore?.id
+            ? {
+                pointDeVenteId: primaryStore.id,
+              }
+            : {}),
       },
       select: {
         pointDeVenteId: true,
@@ -2842,6 +4351,7 @@ const getCashRegisters = async (req, res) => {
 module.exports = {
   login,
   getProducts,
+  getProductSales,
   getProductByBarcode,
   getStocks,
   getStockAlerts,
@@ -2854,6 +4364,7 @@ module.exports = {
   getCustomerById,
   getCustomerSales,
   payCustomerCredit,
+  addSalePayment,
   deleteCustomer,
   getCustomerCredit,
   getSuppliers,
@@ -2864,6 +4375,7 @@ module.exports = {
   getUsers,
   getStores,
   getCashRegisters,
+  createRefund,
   cancelSale,
   returnSale,
 };

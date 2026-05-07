@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useLocation } from "react-router-dom";
 import api from "../services/api";
 import Badge from "../components/Badge";
 import DataTable from "../components/DataTable";
@@ -12,7 +13,7 @@ import {
   markSaleAsSynced,
   updateSaleStatus,
 } from "../services/offlineDb";
-import { getCurrentUser } from "../store/authStore";
+import { getCurrentUser, isAdminRole, isCashierRole } from "../store/authStore";
 import { downloadBlob } from "../utils/downloadBlob";
 import {
   formatCurrencyDh,
@@ -43,15 +44,142 @@ const getCollection = (payload, keys = []) => {
 };
 
 const getSalesCollection = (payload) => getCollection(payload, ["data", "sales"]);
-const getStoresCollection = (payload) => getCollection(payload, ["data", "stores"]);
+
+const getLocalDateKey = (value) => {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
+};
+
+const getLocalMonthKey = (value) => {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  return `${date.getMonth() + 1}/${date.getFullYear()}`;
+};
+
+const getMonthMeta = (value) => {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  const month = date.getMonth() + 1;
+  const year = date.getFullYear();
+  const monthName = new Intl.DateTimeFormat("fr-FR", {
+    month: "long",
+    year: "numeric",
+  }).format(date);
+
+  return {
+    key: `${month}/${year}`,
+    month,
+    year,
+    monthName: monthName.charAt(0).toUpperCase() + monthName.slice(1),
+  };
+};
+
+const getSaleLinePurchasePrice = (item) => {
+  const variantPurchasePrice = Number(item?.variant?.purchasePrice);
+
+  if (Number.isFinite(variantPurchasePrice)) {
+    return variantPurchasePrice;
+  }
+
+  const linePurchasePrice = Number(item?.purchasePrice);
+  return Number.isFinite(linePurchasePrice) ? linePurchasePrice : 0;
+};
+
+const getSaleNetProfit = (sale) =>
+  (sale?.items || []).reduce((profit, item) => {
+    const quantity = Math.abs(Number(item?.quantity || 0));
+    const unitPrice = Math.abs(Number(item?.unitPrice || 0));
+    const purchasePrice = getSaleLinePurchasePrice(item);
+    const subtotal = Number(item?.subtotal || 0);
+    const lineProfit = (unitPrice - purchasePrice) * quantity;
+
+    return subtotal < 0 ? profit - lineProfit : profit + lineProfit;
+  }, 0);
+
+const getSaleTotalPurchase = (sale) =>
+  (sale?.items || []).reduce((totalPurchase, item) => {
+    const quantity = Math.abs(Number(item?.quantity || 0));
+    const purchasePrice = getSaleLinePurchasePrice(item);
+    const subtotal = Number(item?.subtotal || 0);
+    const lineTotalPurchase = purchasePrice * quantity;
+
+    return subtotal < 0
+      ? totalPurchase - lineTotalPurchase
+      : totalPurchase + lineTotalPurchase;
+  }, 0);
 
 const buildInitialReturnQuantities = (sale) =>
   (sale?.items || []).reduce((accumulator, item) => {
-    accumulator[item.productId] = "";
+    accumulator[`${item.productId}-${item.variantId || 0}`] = "";
     return accumulator;
   }, {});
 
-const getSaleStatusMeta = (status, paymentMethod) => {
+const getSaleTypeMeta = (type, total = 0) => {
+  if (type === "refund" || Number(total || 0) < 0) {
+    return {
+      label: "Remboursement",
+      tone: "info",
+    };
+  }
+
+  return {
+    label: "Vente",
+    tone: "success",
+  };
+};
+
+const getSaleStatusMeta = (
+  status,
+  paymentMethod,
+  type,
+  total = 0,
+  paymentStatus = null
+) => {
+  if (type === "refund" || Number(total || 0) < 0) {
+    return {
+      label: "Remboursement",
+      tone: "info",
+    };
+  }
+
+  if (paymentStatus === "PARTIALLY_PAID" || status === "partially_paid") {
+    return {
+      label: "Partiellement paye",
+      tone: "warning",
+    };
+  }
+
+  if (paymentStatus === "CREDIT") {
+    return {
+      label: "Credit",
+      tone: "warning",
+    };
+  }
+
+  if (paymentStatus === "PAID") {
+    return {
+      label: "Paye",
+      tone: "success",
+    };
+  }
+
   if (status === "cancelled") {
     return {
       label: "Annulee",
@@ -80,6 +208,13 @@ const getSaleStatusMeta = (status, paymentMethod) => {
 };
 
 const getPaymentMethodMeta = (paymentMethod) => {
+  if (paymentMethod === "partial") {
+    return {
+      label: "Paiement partiel",
+      tone: "warning",
+    };
+  }
+
   if (paymentMethod === "credit") {
     return {
       label: "Credit",
@@ -135,6 +270,48 @@ const getSyncStatusMeta = (syncStatus, localOnly = false) => {
   };
 };
 
+const getSessionStatusMeta = (status) => {
+  if (status === "FERMEE") {
+    return {
+      label: "Fermee",
+      tone: "danger",
+    };
+  }
+
+  if (status === "OUVERTE") {
+    return {
+      label: "Ouverte",
+      tone: "success",
+    };
+  }
+
+  return {
+    label: "Non archivee",
+    tone: "info",
+  };
+};
+
+const filterSalesList = (sales, { searchTerm, selectedDate, selectedPaymentMethod }) => {
+  const query = searchTerm.trim().toLowerCase();
+
+  return sales.filter((sale) => {
+    const ticket = sale.ticketNumber || sale.id?.toString() || "";
+    const customerName = sale.customerName || "";
+    const customerNumber = sale.customerNumber || "";
+    const saleDate = sale.date || sale.createdAt || "";
+    const matchesSearch =
+      !query ||
+      ticket.toLowerCase().includes(query) ||
+      customerName.toLowerCase().includes(query) ||
+      String(customerNumber).includes(query);
+    const matchesDate = !selectedDate || saleDate.startsWith(selectedDate);
+    const matchesPaymentMethod =
+      selectedPaymentMethod === "all" || sale.paymentMethod === selectedPaymentMethod;
+
+    return matchesSearch && matchesDate && matchesPaymentMethod;
+  });
+};
+
 const mapOfflineSaleToHistorySale = (sale) => ({
   id: `local-${sale.localId}`,
   localId: sale.localId,
@@ -144,6 +321,7 @@ const mapOfflineSaleToHistorySale = (sale) => ({
     .toUpperCase()}`,
   date: sale.createdAt,
   createdAt: sale.createdAt,
+  type: "sale",
   storeId: sale.storeId || null,
   storeName: sale.storeName || (sale.storeId ? `Magasin ${sale.storeId}` : "-"),
   cashRegisterId: sale.caisseId || sale.cashRegisterId || null,
@@ -160,6 +338,9 @@ const mapOfflineSaleToHistorySale = (sale) => ({
   customerName: sale.clientName || sale.customerName || "Client inconnu",
   customerCredit: sale.customerCredit || 0,
   paymentMethod: sale.paymentMethod,
+  paidAmount: sale.paidAmount || sale.total || 0,
+  remainingAmount: sale.remainingAmount || 0,
+  paymentStatus: sale.paymentStatus || "PAID",
   status: "pending_sync",
   syncStatus: sale.syncStatus || "pending",
   syncError: sale.syncError || null,
@@ -168,7 +349,9 @@ const mapOfflineSaleToHistorySale = (sale) => ({
   localOnly: true,
   items: (sale.items || []).map((item) => ({
     productId: item.productId,
+    variantId: item.variantId || null,
     productName: item.productName || item.name || `Produit #${item.productId || "-"}`,
+    variantLabel: item.variantLabel || null,
     quantity: item.quantity || 0,
     returnedQuantity: 0,
     remainingReturnQuantity: 0,
@@ -179,35 +362,42 @@ const mapOfflineSaleToHistorySale = (sale) => ({
 });
 
 function SalesHistoryPage() {
+  const location = useLocation();
+  const [activeTab, setActiveTab] = useState("commandes");
   const [searchTerm, setSearchTerm] = useState("");
-  const [selectedStore, setSelectedStore] = useState("Tous");
   const [selectedDate, setSelectedDate] = useState("");
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState("all");
   const [selectedSale, setSelectedSale] = useState(null);
   const [saleToCancel, setSaleToCancel] = useState(null);
   const [saleToReturn, setSaleToReturn] = useState(null);
-  const [saleToPayCredit, setSaleToPayCredit] = useState(null);
+  const [saleToPay, setSaleToPay] = useState(null);
   const [returnQuantities, setReturnQuantities] = useState({});
   const [returnReason, setReturnReason] = useState("");
-  const [creditPaymentAmount, setCreditPaymentAmount] = useState("");
-  const [creditPaymentNote, setCreditPaymentNote] = useState("");
+  const [salePaymentAmount, setSalePaymentAmount] = useState("");
+  const [salePaymentMethod, setSalePaymentMethod] = useState("cash");
   const [backendSales, setBackendSales] = useState([]);
+  const [backendSessions, setBackendSessions] = useState([]);
   const [offlineSales, setOfflineSalesState] = useState([]);
-  const [stores, setStores] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingSessionDetails, setIsLoadingSessionDetails] = useState(false);
   const [isExportingExcel, setIsExportingExcel] = useState(false);
   const [isExportingPdf, setIsExportingPdf] = useState(false);
   const [isSubmittingCancel, setIsSubmittingCancel] = useState(false);
   const [isSubmittingReturn, setIsSubmittingReturn] = useState(false);
-  const [isSubmittingCreditPayment, setIsSubmittingCreditPayment] = useState(false);
+  const [isSubmittingSalePayment, setIsSubmittingSalePayment] = useState(false);
   const [isSynchronizingOfflineSales, setIsSynchronizingOfflineSales] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [notice, setNotice] = useState({ type: "", message: "" });
   const [cancelModalError, setCancelModalError] = useState("");
   const [returnModalError, setReturnModalError] = useState("");
-  const [creditPaymentError, setCreditPaymentError] = useState("");
+  const [salePaymentError, setSalePaymentError] = useState("");
+  const [selectedSession, setSelectedSession] = useState(null);
+  const [selectedSessionError, setSelectedSessionError] = useState("");
+  const [refundSelectionMode, setRefundSelectionMode] = useState(false);
   const currentUser = getCurrentUser();
-  const isAdmin = currentUser?.role === "admin";
+  const isAdmin = isAdminRole(currentUser?.role);
+  const isCashier = isCashierRole(currentUser?.role);
+  const visibleActiveTab = isCashier ? "commandes" : activeTab;
 
   const loadOfflineSalesState = useCallback(async () => {
     const localSales = await getOfflineSales();
@@ -216,14 +406,13 @@ function SalesHistoryPage() {
   }, []);
 
   const fetchPageData = useCallback(async () => {
-    const [salesResult, storesResult, offlineSalesResult] = await Promise.allSettled([
+    const [salesResult, sessionsResult, offlineSalesResult] = await Promise.allSettled([
       api.get("/sales", {
         params: {
-          paymentMethod:
-            selectedPaymentMethod === "all" ? undefined : selectedPaymentMethod,
+          limit: 500,
         },
       }),
-      api.get("/stores"),
+      isCashier ? Promise.resolve({ data: { data: [] } }) : api.getCashSessions(),
       getOfflineSales(),
     ]);
 
@@ -239,19 +428,19 @@ function SalesHistoryPage() {
       setBackendSales([]);
     }
 
-    if (storesResult.status === "fulfilled") {
-      setStores(getStoresCollection(storesResult.value.data));
+    if (sessionsResult.status === "fulfilled") {
+      setBackendSessions(getCollection(sessionsResult.value.data, ["data", "sessions"]));
     } else {
-      setStores([]);
+      setBackendSessions([]);
     }
 
     const hasOfflineSales =
       offlineSalesResult.status === "fulfilled" && offlineSalesResult.value.length > 0;
 
-    if (salesResult.status === "rejected" && !hasOfflineSales) {
+    if (salesResult.status === "rejected" && sessionsResult.status === "rejected" && !hasOfflineSales) {
       throw salesResult.reason;
     }
-  }, [selectedPaymentMethod]);
+  }, [isCashier]);
 
   useEffect(() => {
     let isMounted = true;
@@ -283,6 +472,46 @@ function SalesHistoryPage() {
     };
   }, [fetchPageData]);
 
+  useEffect(() => {
+    const handleSalesUpdated = () => {
+      fetchPageData().catch(() => {});
+    };
+
+    window.addEventListener("sportzone:sales-updated", handleSalesUpdated);
+    return () => {
+      window.removeEventListener("sportzone:sales-updated", handleSalesUpdated);
+    };
+  }, [fetchPageData]);
+
+  useEffect(() => {
+    const hasRefundIntent = location.state?.refundMode === true;
+
+    if (hasRefundIntent) {
+      setActiveTab("commandes");
+      setSelectedSession(null);
+      setSelectedSessionError("");
+      setRefundSelectionMode(true);
+      return;
+    }
+
+    setRefundSelectionMode(false);
+  }, [location.key, location.state]);
+
+  useEffect(() => {
+    if (!isCashier) {
+      return;
+    }
+
+    if (activeTab !== "commandes") {
+      setActiveTab("commandes");
+    }
+
+    if (selectedSession) {
+      setSelectedSession(null);
+      setSelectedSessionError("");
+    }
+  }, [activeTab, isCashier, selectedSession]);
+
   const sales = useMemo(
     () =>
       [...offlineSales, ...backendSales].sort(
@@ -292,29 +521,6 @@ function SalesHistoryPage() {
       ),
     [backendSales, offlineSales]
   );
-
-  const storeOptions = useMemo(() => {
-    const storeMap = new Map();
-
-    for (const store of stores) {
-      if (store?.name) {
-        storeMap.set(store.name, store);
-      }
-    }
-
-    for (const sale of offlineSales) {
-      const storeName = sale.storeName || sale.storeId;
-
-      if (storeName && !storeMap.has(storeName)) {
-        storeMap.set(storeName, {
-          id: sale.storeId || storeName,
-          name: storeName,
-        });
-      }
-    }
-
-    return Array.from(storeMap.values());
-  }, [offlineSales, stores]);
 
   const hasSyncableOfflineSales = useMemo(
     () =>
@@ -326,40 +532,229 @@ function SalesHistoryPage() {
 
   const filteredSales = useMemo(
     () =>
-      sales.filter((sale) => {
+      filterSalesList(sales, {
+        searchTerm,
+        selectedDate,
+        selectedPaymentMethod,
+      }),
+    [sales, searchTerm, selectedDate, selectedPaymentMethod]
+  );
+
+  const sessions = useMemo(() => backendSessions, [backendSessions]);
+
+  const filteredSessions = useMemo(
+    () =>
+      sessions.filter((session) => {
         const query = searchTerm.trim().toLowerCase();
-        const ticket = sale.ticketNumber || sale.id?.toString() || "";
-        const cashier =
-          sale.cashier || sale.cashierName || sale.userName || sale.user?.name || "";
-        const storeName = sale.store || sale.storeName || sale.store?.name || "";
-        const cashRegisterName =
-          sale.cashRegisterName || sale.cashRegister?.name || "";
-        const customerName = sale.customerName || "";
-        const customerNumber = sale.customerNumber || "";
-        const saleDate = sale.date || sale.createdAt || "";
+        const sessionLabel = String(session.sessionNumber || "").toLowerCase();
+        const sessionDateKey = getLocalDateKey(session.openedAt || session.date || session.createdAt);
         const matchesSearch =
           !query ||
-          ticket.toLowerCase().includes(query) ||
-          cashier.toLowerCase().includes(query) ||
-          cashRegisterName.toLowerCase().includes(query) ||
-          customerName.toLowerCase().includes(query) ||
-          String(customerNumber).includes(query);
-        const matchesStore =
-          selectedStore === "Tous" || storeName === selectedStore;
-        const matchesDate = !selectedDate || saleDate.startsWith(selectedDate);
-        const matchesPaymentMethod =
-          selectedPaymentMethod === "all" ||
-          sale.paymentMethod === selectedPaymentMethod;
+          sessionLabel.includes(query) ||
+          String(sessionDateKey || "").includes(query);
+        const matchesDate = !selectedDate || sessionDateKey === selectedDate;
 
-        return (
-          matchesSearch &&
-          matchesStore &&
-          matchesDate &&
-          matchesPaymentMethod
-        );
+        return matchesSearch && matchesDate;
       }),
-    [sales, searchTerm, selectedStore, selectedDate, selectedPaymentMethod]
+    [sessions, searchTerm, selectedDate]
   );
+
+  const filteredSelectedSessionSales = useMemo(
+    () =>
+      filterSalesList(selectedSession?.sales || [], {
+        searchTerm,
+        selectedDate,
+        selectedPaymentMethod,
+      }),
+    [selectedSession, searchTerm, selectedDate, selectedPaymentMethod]
+  );
+
+  const monthlySummaries = useMemo(() => {
+    const groupedMonths = new Map();
+
+    sales.forEach((sale) => {
+      const saleDate = sale.date || sale.createdAt;
+      const monthMeta = getMonthMeta(saleDate);
+
+      if (!monthMeta) {
+        return;
+      }
+
+      const existingMonth = groupedMonths.get(monthMeta.key) || {
+        id: monthMeta.key,
+        monthKey: monthMeta.key,
+        month: monthMeta.month,
+        year: monthMeta.year,
+        monthName: monthMeta.monthName,
+        ordersCount: 0,
+        totalSales: 0,
+        totalRefunds: 0,
+        totalNet: 0,
+      };
+
+      const saleTotal = Number(sale.total || 0);
+
+      existingMonth.ordersCount += 1;
+      existingMonth.totalSales += saleTotal;
+
+      if (saleTotal < 0 || sale.type === "refund") {
+        existingMonth.totalRefunds += Math.abs(saleTotal);
+      }
+
+      existingMonth.totalNet += getSaleNetProfit(sale);
+      groupedMonths.set(monthMeta.key, existingMonth);
+    });
+
+    return Array.from(groupedMonths.values()).sort((left, right) => {
+      if (left.year !== right.year) {
+        return right.year - left.year;
+      }
+
+      return right.month - left.month;
+    });
+  }, [sales]);
+
+  const filteredMonthlySummaries = useMemo(() => {
+    const query = searchTerm.trim().toLowerCase();
+    const selectedMonthKey = selectedDate ? getLocalMonthKey(selectedDate) : "";
+
+    return monthlySummaries.filter((monthSummary) => {
+      const matchesSearch =
+        !query ||
+        monthSummary.monthKey.toLowerCase().includes(query) ||
+        String(monthSummary.year).includes(query) ||
+        monthSummary.monthName.toLowerCase().includes(query);
+      const matchesDate = !selectedMonthKey || monthSummary.monthKey === selectedMonthKey;
+
+      return matchesSearch && matchesDate;
+    });
+  }, [monthlySummaries, searchTerm, selectedDate]);
+
+  const handleOpenSession = useCallback(async (session) => {
+    if (!session?.id) {
+      return;
+    }
+
+    try {
+      setIsLoadingSessionDetails(true);
+      setSelectedSessionError("");
+      const response = await api.getCashSessionById(session.id);
+      setSelectedSession(response.data?.data || session);
+    } catch (error) {
+      setSelectedSession(session);
+      setSelectedSessionError(
+        error.response?.data?.message || "Impossible de charger les commandes de cette session."
+      );
+    } finally {
+      setIsLoadingSessionDetails(false);
+    }
+  }, []);
+
+  const renderSaleRow = (sale, index) => {
+    const ticket = sale.ticketNumber || sale.id?.toString() || "-";
+    const customerLabel = sale.customerName
+      ? `#${sale.customerNumber || "-"} - ${sale.customerName}`
+      : "Client inconnu";
+    const saleDate = sale.date || sale.createdAt;
+    const items = sale.items || [];
+    const itemsCount = sale.itemsCount || items.length || 0;
+    const saleNet =
+      Number.isFinite(Number(sale.net)) ? Number(sale.net) : getSaleNetProfit(sale);
+    const paymentMeta = getPaymentMethodMeta(sale.paymentMethod);
+    const statusMeta = sale.localOnly
+      ? {
+          label: "En attente sync",
+          tone: "warning",
+        }
+      : getSaleStatusMeta(
+          sale.status,
+          sale.paymentMethod,
+          sale.type,
+          sale.total,
+          sale.paymentStatus
+        );
+    const returnActionLabel = refundSelectionMode
+      ? "Rembourser cette facture"
+      : "Retour";
+    const returnActionClassName = refundSelectionMode
+      ? "secondary-button sales-refund-action"
+      : "table-action-button";
+
+    return (
+      <tr key={`${ticket}-${index}`}>
+        <td>
+          <strong>{ticket}</strong>
+        </td>
+        <td>{saleDate ? formatDateTime(saleDate) : "-"}</td>
+        <td>{customerLabel}</td>
+        <td>{itemsCount}</td>
+        <td>{formatCurrencyDh(sale.total || 0)}</td>
+        <td>{formatCurrencyDh(saleNet)}</td>
+        <td>
+          <div className="table-cell-stack">
+            <Badge tone={paymentMeta.tone}>{paymentMeta.label}</Badge>
+            {Number(sale.paidAmount || 0) > 0 &&
+            Number(sale.remainingAmount || 0) > 0 ? (
+              <>
+                <span className="muted-text">
+                  Paye: {formatCurrencyDh(sale.paidAmount || 0)}
+                </span>
+                <span className="muted-text">
+                  Reste: {formatCurrencyDh(sale.remainingAmount || 0)}
+                </span>
+              </>
+            ) : null}
+            {sale.localOnly ? (
+              <span className="muted-text">
+                {getSyncStatusMeta(sale.syncStatus, sale.localOnly).label}
+              </span>
+            ) : null}
+          </div>
+        </td>
+        <td>
+          <Badge tone={statusMeta.tone}>{statusMeta.label}</Badge>
+        </td>
+        <td>
+          <div className="table-action-row">
+            <button
+              className="table-action-button"
+              type="button"
+              onClick={() => setSelectedSale(sale)}
+            >
+              Voir details
+            </button>
+            {canCancelSale(sale) ? (
+              <button
+                className="table-action-button danger"
+                type="button"
+                onClick={() => openCancelModal(sale)}
+              >
+                Annuler vente
+              </button>
+            ) : null}
+            {canReturnSale(sale) ? (
+              <button
+                className={returnActionClassName}
+                type="button"
+                onClick={() => openReturnModal(sale)}
+              >
+                {returnActionLabel}
+              </button>
+            ) : null}
+            {canAddPaymentSale(sale) ? (
+              <button
+                className="table-action-button"
+                type="button"
+                onClick={() => openSalePaymentModal(sale)}
+              >
+                Ajouter paiement
+              </button>
+            ) : null}
+          </div>
+        </td>
+      </tr>
+    );
+  };
 
   const handlePrintTicket = (sale) => {
     if (!sale) {
@@ -374,6 +769,11 @@ function SalesHistoryPage() {
     const cashierName =
       sale.cashier || sale.cashierName || sale.userName || sale.user?.name || "-";
     const items = sale.items || [];
+    const totalPurchase =
+      Number.isFinite(Number(sale.totalPurchase))
+        ? Number(sale.totalPurchase)
+        : getSaleTotalPurchase(sale);
+    const net = Number.isFinite(Number(sale.net)) ? Number(sale.net) : getSaleNetProfit(sale);
     const rowsHtml = items
       .map((item) => {
         const productName =
@@ -499,7 +899,7 @@ function SalesHistoryPage() {
         <body>
           <section class="ticket">
             <div class="ticket-header">
-              <h1 class="ticket-title">Multi-POS Manager</h1>
+              <h1 class="ticket-title">SportZone</h1>
               <p class="ticket-subtitle">Ticket de caisse</p>
             </div>
 
@@ -545,6 +945,23 @@ function SalesHistoryPage() {
               <span>${escapeHtml(formatCurrencyDh(sale.total || 0))}</span>
             </div>
 
+            ${
+              isAdmin
+                ? `
+            <div class="ticket-meta" style="margin-top: 12px;">
+              <div class="ticket-meta-row">
+                <span>Total achat</span>
+                <strong>${escapeHtml(formatCurrencyDh(totalPurchase))}</strong>
+              </div>
+              <div class="ticket-meta-row">
+                <span>Net</span>
+                <strong>${escapeHtml(formatCurrencyDh(net))}</strong>
+              </div>
+            </div>
+            `
+                : ""
+            }
+
             <p class="ticket-footer">Merci pour votre achat</p>
           </section>
         </body>
@@ -557,12 +974,10 @@ function SalesHistoryPage() {
   };
 
   const handleExportSales = async (format) => {
-    const selectedStoreMatch = stores.find((store) => store.name === selectedStore);
     const params = {
       search: searchTerm.trim() || undefined,
       startDate: selectedDate || undefined,
       endDate: selectedDate || undefined,
-      storeId: selectedStoreMatch?.id || undefined,
       paymentMethod:
         selectedPaymentMethod === "all" ? undefined : selectedPaymentMethod,
     };
@@ -629,6 +1044,8 @@ function SalesHistoryPage() {
           storeId: sale.storeId,
           caisseId: sale.caisseId || sale.cashRegisterId,
           paymentMethod: sale.paymentMethod,
+          paidAmount: sale.paidAmount,
+          remainingAmount: sale.remainingAmount,
           total: sale.total,
           items: (sale.items || []).map((item) => ({
             productId: item.productId,
@@ -679,14 +1096,15 @@ function SalesHistoryPage() {
 
   const canReturnSale = (sale) =>
     !sale?.localOnly &&
+    sale?.type !== "refund" &&
     sale?.status !== "cancelled" &&
     sale?.items?.some((item) => (item.remainingReturnQuantity ?? item.quantity ?? 0) > 0);
 
-  const canPayCreditSale = (sale) =>
+  const canAddPaymentSale = (sale) =>
     !sale?.localOnly &&
-    sale?.paymentMethod === "credit" &&
-    Number(sale?.customerCredit || 0) > 0 &&
-    Number(sale?.customerId || 0) > 0;
+    sale?.type !== "refund" &&
+    Number(sale?.remainingAmount || 0) > 0 &&
+    ["credit", "partial"].includes(sale?.paymentMethod);
 
   const openCancelModal = (sale) => {
     setNotice({ type: "", message: "" });
@@ -713,15 +1131,13 @@ function SalesHistoryPage() {
     setReturnReason("");
   };
 
-  const openCreditPaymentModal = (sale) => {
+  const openSalePaymentModal = (sale) => {
     setNotice({ type: "", message: "" });
-    setCreditPaymentError("");
+    setSalePaymentError("");
     setSelectedSale(null);
-    setSaleToPayCredit(sale);
-    setCreditPaymentAmount(String(Math.min(Number(sale?.total || 0), Number(sale?.customerCredit || 0))));
-    setCreditPaymentNote(
-      `Paiement credit depuis ticket ${sale?.ticketNumber || sale?.id || ""}`
-    );
+    setSaleToPay(sale);
+    setSalePaymentAmount(String(Number(sale?.remainingAmount || 0) || ""));
+    setSalePaymentMethod("cash");
   };
 
   const closeReturnModal = () => {
@@ -735,22 +1151,22 @@ function SalesHistoryPage() {
     setReturnModalError("");
   };
 
-  const closeCreditPaymentModal = () => {
-    if (isSubmittingCreditPayment) {
+  const closeSalePaymentModal = () => {
+    if (isSubmittingSalePayment) {
       return;
     }
 
-    setSaleToPayCredit(null);
-    setCreditPaymentAmount("");
-    setCreditPaymentNote("");
-    setCreditPaymentError("");
+    setSaleToPay(null);
+    setSalePaymentAmount("");
+    setSalePaymentMethod("cash");
+    setSalePaymentError("");
   };
 
-  const handleReturnQuantityChange = (productId, value) => {
+  const handleReturnQuantityChange = (itemKey, value) => {
     if (value === "") {
       setReturnQuantities((current) => ({
         ...current,
-        [productId]: "",
+        [itemKey]: "",
       }));
       return;
     }
@@ -760,7 +1176,7 @@ function SalesHistoryPage() {
     setReturnModalError("");
     setReturnQuantities((current) => ({
       ...current,
-      [productId]: String(normalizedValue),
+      [itemKey]: String(normalizedValue),
     }));
   };
 
@@ -800,12 +1216,15 @@ function SalesHistoryPage() {
 
     const normalizedItems = (saleToReturn.items || [])
       .map((item) => {
-        const rawQuantity = returnQuantities[item.productId];
+        const itemKey = `${item.productId}-${item.variantId || 0}`;
+        const rawQuantity = returnQuantities[itemKey];
         const quantity = rawQuantity === "" ? 0 : Number(rawQuantity);
 
         return {
           productId: item.productId,
+          variantId: item.variantId || null,
           productName: item.productName || item.name || "-",
+          variantLabel: item.variantLabel || null,
           maxQuantity: item.remainingReturnQuantity ?? item.quantity ?? 0,
           quantity,
         };
@@ -818,9 +1237,9 @@ function SalesHistoryPage() {
     }
 
     for (const item of normalizedItems) {
-      if (!Number.isInteger(item.quantity) || item.quantity <= 0) {
+      if (!Number.isFinite(item.quantity) || item.quantity <= 0) {
         setReturnModalError(
-          `La quantite retournee pour ${item.productName} doit etre un entier positif.`
+          `La quantite retournee pour ${item.productName} doit etre un nombre positif.`
         );
         return;
       }
@@ -837,18 +1256,33 @@ function SalesHistoryPage() {
       setIsSubmittingReturn(true);
       setReturnModalError("");
 
-      await api.post(`/sales/${saleToReturn.id}/return`, {
+      const payload = {
         items: normalizedItems.map((item) => ({
           produitId: item.productId,
+          varianteId: item.variantId,
           quantity: item.quantity,
         })),
         reason: returnReason.trim(),
-      });
+      };
+
+      const response = refundSelectionMode
+        ? await api.post("/refunds", {
+            ...payload,
+            saleId: saleToReturn.id,
+          })
+        : await api.post(`/sales/${saleToReturn.id}/return`, payload);
+
       await fetchPageData();
       closeReturnModal();
       setNotice({
         type: "success",
-        message: "Retour effectue",
+        message: refundSelectionMode
+          ? `Remboursement cree${
+              response?.data?.sale?.ticketNumber
+                ? ` (${response.data.sale.ticketNumber})`
+                : ""
+            }`
+          : "Retour effectue",
       });
     } catch (error) {
       setReturnModalError(
@@ -860,57 +1294,58 @@ function SalesHistoryPage() {
     }
   };
 
-  const handleSubmitCreditPayment = async (event) => {
+  const handleSubmitSalePayment = async (event) => {
     event.preventDefault();
 
-    if (!saleToPayCredit?.customerId) {
-      setCreditPaymentError("Client introuvable pour ce ticket.");
+    if (!saleToPay?.id) {
+      setSalePaymentError("Vente introuvable pour ce ticket.");
       return;
     }
 
-    if (creditPaymentAmount === "") {
-      setCreditPaymentError("Le montant paye est obligatoire.");
+    if (salePaymentAmount === "") {
+      setSalePaymentError("Le montant recu est obligatoire.");
       return;
     }
 
-    const amount = Number(creditPaymentAmount);
-    const currentCredit = Number(saleToPayCredit.customerCredit || 0);
+    const amount = Number(salePaymentAmount);
+    const remainingAmount = Number(saleToPay?.remainingAmount || 0);
 
     if (!Number.isFinite(amount) || amount <= 0) {
-      setCreditPaymentError("Le montant paye doit etre superieur a 0.");
+      setSalePaymentError("Le montant recu doit etre superieur a 0.");
       return;
     }
 
-    if (amount > currentCredit) {
-      setCreditPaymentError("Le montant paye ne peut pas depasser le credit client.");
+    if (amount > remainingAmount) {
+      setSalePaymentError("Le montant recu ne peut pas depasser le reste a payer.");
+      return;
+    }
+
+    if (!["cash", "card"].includes(salePaymentMethod)) {
+      setSalePaymentError("Le mode de paiement doit etre Especes ou Carte bancaire.");
       return;
     }
 
     try {
-      setIsSubmittingCreditPayment(true);
-      setCreditPaymentError("");
+      setIsSubmittingSalePayment(true);
+      setSalePaymentError("");
 
-      await api.post(`/customers/${saleToPayCredit.customerId}/pay-credit`, {
+      await api.patch(`/sales/${saleToPay.id}/payment`, {
         amount,
-        note:
-          creditPaymentNote.trim() ||
-          `Paiement credit depuis ticket ${
-            saleToPayCredit.ticketNumber || saleToPayCredit.id
-          }`,
+        paymentMethod: salePaymentMethod,
       });
       await fetchPageData();
-      closeCreditPaymentModal();
+      closeSalePaymentModal();
       setNotice({
         type: "success",
-        message: "Credit paye avec succes.",
+        message: "Paiement ajoute avec succes.",
       });
     } catch (error) {
-      setCreditPaymentError(
+      setSalePaymentError(
         error.response?.data?.message ||
-          "Impossible d'enregistrer ce paiement de credit pour le moment."
+          "Impossible d'enregistrer ce paiement pour le moment."
       );
     } finally {
-      setIsSubmittingCreditPayment(false);
+      setIsSubmittingSalePayment(false);
     }
   };
 
@@ -919,36 +1354,101 @@ function SalesHistoryPage() {
       <PageHeader
         eyebrow="Historique"
         title="Historique des ventes"
-        description="Consulter les tickets, filtrer par date ou magasin et visualiser les details de vente."
+        description="Consulter les commandes et les sessions journalieres du POS SportZone."
       />
 
       {notice.message ? (
         <div className={`inline-notice ${notice.type}`}>{notice.message}</div>
       ) : null}
 
-      <SectionCard
-        title="Tickets de vente"
-        description="Rechercher par numero de ticket ou caissier."
-        actions={
-          hasSyncableOfflineSales ? (
+      {refundSelectionMode ? (
+        <div className="inline-notice info sales-refund-banner">
+          <Badge tone="info">Mode remboursement</Badge>
+          <span>Selectionnez une facture a rembourser dans l'onglet Commandes.</span>
+        </div>
+      ) : null}
+
+      <div className="period-selector">
+        <button
+          className={`period-button ${visibleActiveTab === "commandes" ? "active" : ""}`}
+          type="button"
+          onClick={() => setActiveTab("commandes")}
+        >
+          Commandes
+        </button>
+        {!isCashier ? (
+          <>
             <button
-              className="secondary-button"
+              className={`period-button ${visibleActiveTab === "sessions" ? "active" : ""}`}
               type="button"
-              onClick={handleSyncOfflineSales}
-              disabled={isSynchronizingOfflineSales}
+              onClick={() => setActiveTab("sessions")}
             >
-              {isSynchronizingOfflineSales
-                ? "Synchronisation..."
-                : "Synchroniser les ventes offline"}
+              Sessions
             </button>
-          ) : null
+            <button
+              className={`period-button ${visibleActiveTab === "mois" ? "active" : ""}`}
+              type="button"
+              onClick={() => setActiveTab("mois")}
+            >
+              Mois
+            </button>
+          </>
+        ) : null}
+      </div>
+
+      <SectionCard
+        title={
+          visibleActiveTab === "commandes"
+            ? "Commandes"
+            : visibleActiveTab === "sessions"
+              ? "Sessions"
+              : "Mois"
+        }
+        description={
+          visibleActiveTab === "commandes"
+            ? refundSelectionMode
+              ? "Selectionnez une facture a rembourser. L'action de retour reste disponible et mise en avant."
+              : "Contient toutes les factures et tickets de vente: ventes normales, remboursements, paiements partiels et credits."
+            : visibleActiveTab === "sessions"
+              ? "Contient les journees POS regroupees par session reelle sous la forme POS/1, POS/2, POS/3..."
+              : "Contient les ventes regroupees par mois civil avec chiffre d'affaires, remboursements et benefice net."
+        }
+        actions={
+          visibleActiveTab === "commandes"
+            ? (
+              <div className="table-action-row">
+                {refundSelectionMode ? (
+                  <Badge tone="info">Selection facture remboursement</Badge>
+                ) : null}
+                {hasSyncableOfflineSales ? (
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    onClick={handleSyncOfflineSales}
+                    disabled={isSynchronizingOfflineSales}
+                  >
+                    {isSynchronizingOfflineSales
+                      ? "Synchronisation..."
+                      : "Synchroniser les ventes offline"}
+                  </button>
+                ) : null}
+              </div>
+            )
+            : null
         }
       >
         <div className="filter-row">
           <SearchInput
             value={searchTerm}
             onChange={setSearchTerm}
-            placeholder="Rechercher par ticket ou utilisateur"
+            placeholder={
+              visibleActiveTab === "commandes" ||
+              (visibleActiveTab === "sessions" && Boolean(selectedSession))
+                ? "Rechercher par ticket ou client"
+                : visibleActiveTab === "sessions"
+                  ? "Rechercher par session ou date"
+                  : "Rechercher par mois ou annee"
+            }
           />
 
           <input
@@ -958,167 +1458,234 @@ function SalesHistoryPage() {
             onChange={(event) => setSelectedDate(event.target.value)}
           />
 
-          <select
-            className="text-input select-input"
-            value={selectedStore}
-            onChange={(event) => setSelectedStore(event.target.value)}
-          >
-            <option value="Tous">Tous les magasins</option>
-            {storeOptions.map((store) => (
-              <option key={store.id} value={store.name}>
-                {store.name}
-              </option>
-            ))}
-          </select>
+          {visibleActiveTab === "commandes" ||
+          (visibleActiveTab === "sessions" && Boolean(selectedSession)) ? (
+            <>
+              <select
+                className="text-input select-input"
+                value={selectedPaymentMethod}
+                onChange={(event) => setSelectedPaymentMethod(event.target.value)}
+              >
+                <option value="all">Tous les paiements</option>
+                <option value="cash">Especes</option>
+                <option value="card">Carte bancaire</option>
+                <option value="credit">Credit</option>
+                <option value="partial">Paiement partiel</option>
+              </select>
 
-          <select
-            className="text-input select-input"
-            value={selectedPaymentMethod}
-            onChange={(event) => setSelectedPaymentMethod(event.target.value)}
-          >
-            <option value="all">Tous les paiements</option>
-            <option value="cash">Especes</option>
-            <option value="card">Carte bancaire</option>
-            <option value="credit">Credit</option>
-          </select>
+              <button
+                className="ghost-button"
+                type="button"
+                onClick={() => handleExportSales("excel")}
+                disabled={isExportingExcel || isExportingPdf}
+              >
+                {isExportingExcel ? "Export Excel..." : "Exporter Excel"}
+              </button>
 
-          <button
-            className="ghost-button"
-            type="button"
-            onClick={() => handleExportSales("excel")}
-            disabled={isExportingExcel || isExportingPdf}
-          >
-            {isExportingExcel ? "Export Excel..." : "Exporter Excel"}
-          </button>
-
-          <button
-            className="primary-button"
-            type="button"
-            onClick={() => handleExportSales("pdf")}
-            disabled={isExportingExcel || isExportingPdf}
-          >
-            {isExportingPdf ? "Export PDF..." : "Exporter PDF"}
-          </button>
+              <button
+                className="primary-button"
+                type="button"
+                onClick={() => handleExportSales("pdf")}
+                disabled={isExportingExcel || isExportingPdf}
+              >
+                {isExportingPdf ? "Export PDF..." : "Exporter PDF"}
+              </button>
+            </>
+          ) : null}
         </div>
 
-            {errorMessage ? (
+        {errorMessage ? (
           <div className="inline-notice error">{errorMessage}</div>
         ) : null}
 
-        <DataTable
-          columns={[
-            { key: "ticket", label: "Ticket" },
-            { key: "date", label: "Date" },
-            { key: "store", label: "Magasin" },
-            { key: "cashRegister", label: "Caisse" },
-            { key: "cashier", label: "Caissier" },
-            { key: "customer", label: "Client" },
-            { key: "items", label: "Nb articles" },
-            { key: "total", label: "Total" },
-            { key: "payment", label: "Paiement" },
-            { key: "sync", label: "Sync" },
-            { key: "status", label: "Statut" },
-            { key: "actions", label: "Actions" },
-          ]}
-          data={filteredSales}
-          emptyTitle={
-            isLoading ? "Chargement..." : "Aucune vente trouvee pour ce filtre"
-          }
-          emptyDescription={
-            isLoading
-              ? "Recuperation des ventes en cours."
-              : "Modifiez les filtres pour afficher des tickets."
-          }
-          renderRow={(sale, index) => {
-            const ticket = sale.ticketNumber || sale.id?.toString() || "-";
-            const storeName = sale.store || sale.storeName || sale.store?.name || "-";
-            const cashRegisterName =
-              sale.cashRegisterName || sale.cashRegister?.name || "-";
-            const cashier =
-              sale.cashier || sale.cashierName || sale.userName || sale.user?.name || "-";
-            const customerLabel = sale.customerName
-              ? `#${sale.customerNumber || "-"} - ${sale.customerName}`
-              : "Client inconnu";
-            const saleDate = sale.date || sale.createdAt;
-            const items = sale.items || [];
-            const itemsCount = sale.itemsCount || items.length || 0;
-            const paymentMeta = getPaymentMethodMeta(sale.paymentMethod);
-            const syncMeta = getSyncStatusMeta(sale.syncStatus, sale.localOnly);
-            const statusMeta = sale.localOnly
-              ? {
-                  label: "En attente sync",
-                  tone: "warning",
-                }
-              : getSaleStatusMeta(sale.status, sale.paymentMethod);
+        {visibleActiveTab === "commandes" ? (
+          <DataTable
+            columns={[
+              { key: "ticket", label: "Ticket" },
+              { key: "date", label: "Date" },
+              { key: "customer", label: "Client" },
+              { key: "items", label: "Nb articles" },
+              { key: "total", label: "Total" },
+              { key: "net", label: "Net" },
+              { key: "payment", label: "Paiement" },
+              { key: "status", label: "Statut" },
+              { key: "actions", label: "Actions" },
+            ]}
+            data={filteredSales}
+            emptyTitle={
+              isLoading ? "Chargement..." : "Aucune commande trouvee pour ce filtre"
+            }
+            emptyDescription={
+              isLoading
+                ? "Recuperation des commandes en cours."
+                : "Modifiez les filtres pour afficher des tickets."
+            }
+            renderRow={renderSaleRow}
+          />
+        ) : visibleActiveTab === "sessions" && selectedSession ? (
+          <div className="sales-session-view">
+            {selectedSessionError ? (
+              <div className="inline-notice warning">{selectedSessionError}</div>
+            ) : null}
 
-            return (
-              <tr key={`${ticket}-${index}`}>
-                <td>
-                  <strong>{ticket}</strong>
-                </td>
-                <td>{saleDate ? formatDateTime(saleDate) : "-"}</td>
-                <td>{storeName}</td>
-                <td>{cashRegisterName}</td>
-                <td>{cashier}</td>
-                <td>{customerLabel}</td>
-                <td>{itemsCount}</td>
-                <td>{formatCurrencyDh(sale.total || 0)}</td>
-                <td>
-                  <Badge tone={paymentMeta.tone}>{paymentMeta.label}</Badge>
-                </td>
-                <td>
-                  <div className="table-cell-stack">
-                    <Badge tone={syncMeta.tone}>{syncMeta.label}</Badge>
-                    {sale.syncStatus === "failed" && sale.syncError ? (
-                      <span className="muted-text">{sale.syncError}</span>
-                    ) : null}
-                  </div>
-                </td>
-                <td>
-                  <Badge tone={statusMeta.tone}>{statusMeta.label}</Badge>
-                </td>
-                <td>
-                  <div className="table-action-row">
+            <SectionCard
+              title={`Commandes de ${selectedSession.sessionNumber}`}
+              description="Vue detaillee des commandes rattachees a cette session POS."
+              actions={
+                <button
+                  className="ghost-button"
+                  type="button"
+                  onClick={() => {
+                    setSelectedSession(null);
+                    setSelectedSessionError("");
+                  }}
+                >
+                  Retour aux sessions
+                </button>
+              }
+            >
+              <div className="details-list">
+                <div className="detail-stat">
+                  <span>Date ouverture</span>
+                  <strong>{formatDateTime(selectedSession.openedAt || selectedSession.date)}</strong>
+                </div>
+                <div className="detail-stat">
+                  <span>Date cloture</span>
+                  <strong>
+                    {selectedSession.closedAt
+                      ? formatDateTime(selectedSession.closedAt)
+                      : "-"}
+                  </strong>
+                </div>
+                <div className="detail-stat">
+                  <span>Total ventes</span>
+                  <strong>{formatCurrencyDh(selectedSession.totalSales || 0)}</strong>
+                </div>
+                <div className="detail-stat">
+                  <span>Total remboursements</span>
+                  <strong>{formatCurrencyDh(selectedSession.totalRefunds || 0)}</strong>
+                </div>
+                <div className="detail-stat">
+                  <span>Total net</span>
+                  <strong>{formatCurrencyDh(selectedSession.totalNet || 0)}</strong>
+                </div>
+                <div className="detail-stat">
+                  <span>Statut</span>
+                  <strong>{getSessionStatusMeta(selectedSession.status).label}</strong>
+                </div>
+              </div>
+
+              <DataTable
+                columns={[
+                  { key: "ticket", label: "Ticket" },
+                  { key: "date", label: "Date" },
+                  { key: "customer", label: "Client" },
+                  { key: "items", label: "Nb articles" },
+                  { key: "total", label: "Total" },
+                  { key: "net", label: "Net" },
+                  { key: "payment", label: "Paiement" },
+                  { key: "status", label: "Statut" },
+                  { key: "actions", label: "Actions" },
+                ]}
+                data={filteredSelectedSessionSales}
+                emptyTitle={
+                  isLoadingSessionDetails
+                    ? "Chargement des commandes..."
+                    : "Aucune commande pour cette session"
+                }
+                emptyDescription={
+                  isLoadingSessionDetails
+                    ? "Recuperation des commandes de la session en cours."
+                    : "Ajustez les filtres ou revenez aux sessions."
+                }
+                renderRow={renderSaleRow}
+              />
+            </SectionCard>
+          </div>
+        ) : visibleActiveTab === "sessions" ? (
+          <DataTable
+            columns={[
+              { key: "session", label: "Session" },
+              { key: "openedAt", label: "Date ouverture" },
+              { key: "closedAt", label: "Date cloture" },
+              { key: "orders", label: "Nombre de commandes" },
+              { key: "sales", label: "Total ventes" },
+              { key: "refunds", label: "Total remboursements" },
+              { key: "net", label: "Total net" },
+              { key: "status", label: "Statut" },
+              { key: "actions", label: "Actions" },
+            ]}
+            data={filteredSessions}
+            emptyTitle={isLoading ? "Chargement..." : "Aucune session trouvee"}
+            emptyDescription={
+              isLoading
+                ? "Recuperation des sessions POS en cours."
+                : "Les sessions de caisse cloturees et ouvertes apparaitront ici."
+            }
+            renderRow={(session) => {
+              const statusMeta = getSessionStatusMeta(session.status);
+
+              return (
+                <tr key={session.id}>
+                  <td>
+                    <strong>{session.sessionNumber}</strong>
+                  </td>
+                  <td>{formatDateTime(session.openedAt)}</td>
+                  <td>{session.closedAt ? formatDateTime(session.closedAt) : "-"}</td>
+                  <td>{session.ordersCount || 0}</td>
+                  <td>{formatCurrencyDh(session.totalSales || 0)}</td>
+                  <td>{formatCurrencyDh(session.totalRefunds || 0)}</td>
+                  <td>{formatCurrencyDh(session.totalNet || 0)}</td>
+                  <td>
+                    <Badge tone={statusMeta.tone}>{statusMeta.label}</Badge>
+                  </td>
+                  <td>
                     <button
                       className="table-action-button"
                       type="button"
-                      onClick={() => setSelectedSale(sale)}
+                      onClick={() => handleOpenSession(session)}
                     >
-                      Voir details
+                      Voir commandes
                     </button>
-                    {canCancelSale(sale) ? (
-                      <button
-                        className="table-action-button danger"
-                        type="button"
-                        onClick={() => openCancelModal(sale)}
-                      >
-                        Annuler vente
-                      </button>
-                    ) : null}
-                    {canReturnSale(sale) ? (
-                      <button
-                        className="table-action-button"
-                        type="button"
-                        onClick={() => openReturnModal(sale)}
-                      >
-                        Retour
-                      </button>
-                    ) : null}
-                    {canPayCreditSale(sale) ? (
-                      <button
-                        className="table-action-button"
-                        type="button"
-                        onClick={() => openCreditPaymentModal(sale)}
-                      >
-                        Payer credit
-                      </button>
-                    ) : null}
+                  </td>
+                </tr>
+              );
+            }}
+          />
+        ) : (
+          <DataTable
+            columns={[
+              { key: "month", label: "Mois" },
+              { key: "year", label: "Annee" },
+              { key: "orders", label: "Nombre de commandes" },
+              { key: "sales", label: "Total vendu" },
+              { key: "refunds", label: "Total remboursements" },
+              { key: "net", label: "Total net" },
+            ]}
+            data={filteredMonthlySummaries}
+            emptyTitle={isLoading ? "Chargement..." : "Aucun mois trouve"}
+            emptyDescription={
+              isLoading
+                ? "Recuperation des ventes mensuelles en cours."
+                : "Les ventes seront regroupees ici par mois."
+            }
+            renderRow={(monthSummary) => (
+              <tr key={monthSummary.id}>
+                <td>
+                  <div className="table-cell-stack">
+                    <strong>{monthSummary.monthKey}</strong>
+                    <span className="muted-text">{monthSummary.monthName}</span>
                   </div>
                 </td>
+                <td>{monthSummary.year}</td>
+                <td>{monthSummary.ordersCount || 0}</td>
+                <td>{formatCurrencyDh(monthSummary.totalSales || 0)}</td>
+                <td>{formatCurrencyDh(monthSummary.totalRefunds || 0)}</td>
+                <td>{formatCurrencyDh(monthSummary.totalNet || 0)}</td>
               </tr>
-            );
-          }}
-        />
+            )}
+          />
+        )}
       </SectionCard>
 
       <Modal
@@ -1131,12 +1698,7 @@ function SalesHistoryPage() {
         }
         description={
           selectedSale
-            ? `${
-                selectedSale.store ||
-                selectedSale.storeName ||
-                selectedSale.store?.name ||
-                "-"
-              } - ${formatDateTime(selectedSale.date || selectedSale.createdAt)}`
+            ? `${formatDateTime(selectedSale.date || selectedSale.createdAt)}`
             : ""
         }
         onClose={() => setSelectedSale(null)}
@@ -1144,11 +1706,11 @@ function SalesHistoryPage() {
           <>
             {selectedSale && canReturnSale(selectedSale) ? (
               <button
-                className="ghost-button"
+                className={refundSelectionMode ? "secondary-button" : "ghost-button"}
                 type="button"
                 onClick={() => openReturnModal(selectedSale)}
               >
-                Retour
+                {refundSelectionMode ? "Rembourser cette facture" : "Retour"}
               </button>
             ) : null}
             {selectedSale && canCancelSale(selectedSale) ? (
@@ -1160,13 +1722,13 @@ function SalesHistoryPage() {
                 Annuler vente
               </button>
             ) : null}
-            {selectedSale && canPayCreditSale(selectedSale) ? (
+            {selectedSale && canAddPaymentSale(selectedSale) ? (
               <button
                 className="table-action-button"
                 type="button"
-                onClick={() => openCreditPaymentModal(selectedSale)}
+                onClick={() => openSalePaymentModal(selectedSale)}
               >
-                Payer credit
+                Ajouter paiement
               </button>
             ) : null}
             <button
@@ -1188,91 +1750,118 @@ function SalesHistoryPage() {
       >
         {selectedSale ? (
           <>
-            <div className="details-list">
-              <div className="detail-stat">
-                <span>Date</span>
-                <strong>
-                  {formatDateOnly(selectedSale.date || selectedSale.createdAt)}
-                </strong>
-              </div>
-              <div className="detail-stat">
-                <span>Caissier</span>
-                <strong>
-                  {selectedSale.cashier ||
-                    selectedSale.cashierName ||
-                    selectedSale.userName ||
-                    selectedSale.user?.name ||
-                    "-"}
-                </strong>
-              </div>
-              <div className="detail-stat">
-                <span>Magasin</span>
-                <strong>
-                  {selectedSale.store ||
-                    selectedSale.storeName ||
-                    selectedSale.store?.name ||
-                    "-"}
-                </strong>
-              </div>
-              <div className="detail-stat">
-                <span>Caisse</span>
-                <strong>
-                  {selectedSale.cashRegisterName ||
-                    selectedSale.cashRegister?.name ||
-                    "-"}
-                </strong>
-              </div>
-              <div className="detail-stat">
-                <span>Paiement</span>
-                <strong>
-                  {
-                    getPaymentMethodMeta(selectedSale.paymentMethod).label
-                  }
-                </strong>
-              </div>
-              <div className="detail-stat">
-                <span>Sync</span>
-                <strong>
-                  {getSyncStatusMeta(
-                    selectedSale.syncStatus,
-                    selectedSale.localOnly
-                  ).label}
-                </strong>
-              </div>
-              {selectedSale.syncStatus === "failed" && selectedSale.syncError ? (
-                <div className="detail-stat">
-                  <span>Erreur sync</span>
-                  <strong>{selectedSale.syncError}</strong>
-                </div>
-              ) : null}
-              <div className="detail-stat">
-                <span>Numero client</span>
-                <strong>
-                  {selectedSale.customerNumber
-                    ? `#${selectedSale.customerNumber}`
-                    : "#1"}
-                </strong>
-              </div>
-              <div className="detail-stat">
-                <span>Nom client</span>
-                <strong>{selectedSale.customerName || "Client inconnu"}</strong>
-              </div>
-              <div className="detail-stat">
-                <span>Credit client</span>
-                <strong>{formatCurrencyDh(selectedSale.customerCredit || 0)}</strong>
-              </div>
-              <div className="detail-stat">
-                <span>Statut</span>
-                <strong>
-                  {selectedSale.localOnly
-                    ? "En attente sync"
-                    : getSaleStatusMeta(
-                        selectedSale.status,
-                        selectedSale.paymentMethod
+            {(() => {
+              const totalPurchase =
+                Number.isFinite(Number(selectedSale.totalPurchase))
+                  ? Number(selectedSale.totalPurchase)
+                  : getSaleTotalPurchase(selectedSale);
+              const net = Number.isFinite(Number(selectedSale.net))
+                ? Number(selectedSale.net)
+                : getSaleNetProfit(selectedSale);
+
+              return (
+                <div className="details-list">
+                  <div className="detail-stat">
+                    <span>Date</span>
+                    <strong>
+                      {formatDateOnly(selectedSale.date || selectedSale.createdAt)}
+                    </strong>
+                  </div>
+                  <div className="detail-stat">
+                    <span>Caissier</span>
+                    <strong>
+                      {selectedSale.cashier ||
+                        selectedSale.cashierName ||
+                        selectedSale.userName ||
+                        selectedSale.user?.name ||
+                        "-"}
+                    </strong>
+                  </div>
+                  <div className="detail-stat">
+                    <span>Type</span>
+                    <strong>{getSaleTypeMeta(selectedSale.type, selectedSale.total).label}</strong>
+                  </div>
+                  <div className="detail-stat">
+                    <span>Paiement</span>
+                    <strong>
+                      {
+                        getPaymentMethodMeta(selectedSale.paymentMethod).label
+                      }
+                    </strong>
+                  </div>
+                  {Number(selectedSale.paidAmount || 0) > 0 &&
+                  Number(selectedSale.remainingAmount || 0) > 0 ? (
+                    <>
+                      <div className="detail-stat">
+                        <span>Montant paye</span>
+                        <strong>{formatCurrencyDh(selectedSale.paidAmount || 0)}</strong>
+                      </div>
+                      <div className="detail-stat">
+                        <span>Reste a payer</span>
+                        <strong>{formatCurrencyDh(selectedSale.remainingAmount || 0)}</strong>
+                      </div>
+                    </>
+                  ) : null}
+                  <div className="detail-stat">
+                    <span>Sync</span>
+                    <strong>
+                      {getSyncStatusMeta(
+                        selectedSale.syncStatus,
+                        selectedSale.localOnly
                       ).label}
-                </strong>
-              </div>
-            </div>
+                    </strong>
+                  </div>
+                  {selectedSale.syncStatus === "failed" && selectedSale.syncError ? (
+                    <div className="detail-stat">
+                      <span>Erreur sync</span>
+                      <strong>{selectedSale.syncError}</strong>
+                    </div>
+                  ) : null}
+                  <div className="detail-stat">
+                    <span>Numero client</span>
+                    <strong>
+                      {selectedSale.customerNumber
+                        ? `#${selectedSale.customerNumber}`
+                        : "#1"}
+                    </strong>
+                  </div>
+                  <div className="detail-stat">
+                    <span>Nom client</span>
+                    <strong>{selectedSale.customerName || "Client inconnu"}</strong>
+                  </div>
+                  <div className="detail-stat">
+                    <span>Credit client</span>
+                    <strong>{formatCurrencyDh(selectedSale.customerCredit || 0)}</strong>
+                  </div>
+                  <div className="detail-stat">
+                    <span>Statut</span>
+                    <strong>
+                      {selectedSale.localOnly
+                        ? "En attente sync"
+                        : getSaleStatusMeta(
+                            selectedSale.status,
+                            selectedSale.paymentMethod,
+                            selectedSale.type,
+                            selectedSale.total,
+                            selectedSale.paymentStatus
+                          ).label}
+                    </strong>
+                  </div>
+                  <div className="detail-stat">
+                    <span>Total facture</span>
+                    <strong>{formatCurrencyDh(selectedSale.total || 0)}</strong>
+                  </div>
+                  <div className="detail-stat">
+                    <span>Total achat</span>
+                    <strong>{formatCurrencyDh(totalPurchase)}</strong>
+                  </div>
+                  <div className="detail-stat">
+                    <span>Net</span>
+                    <strong>{formatCurrencyDh(net)}</strong>
+                  </div>
+                </div>
+              );
+            })()}
 
             <DataTable
               columns={[
@@ -1286,15 +1875,18 @@ function SalesHistoryPage() {
               renderRow={(item, index) => {
                 const productName =
                   item.name || item.productName || item.product?.name || "-";
+                const displayName = item.variantLabel
+                  ? `${productName} / ${item.variantLabel}`
+                  : productName;
                 const unitPrice = item.unitPrice || item.price || 0;
 
                 return (
                   <tr
                     key={`${
                       selectedSale.ticketNumber || selectedSale.id
-                    }-${productName}-${index}`}
+                    }-${displayName}-${index}`}
                   >
-                    <td>{productName}</td>
+                    <td>{displayName}</td>
                     <td>{item.quantity || 0}</td>
                     <td>{item.returnedQuantity || 0}</td>
                     <td>{formatCurrencyDh(unitPrice)}</td>
@@ -1309,8 +1901,14 @@ function SalesHistoryPage() {
             />
 
             <div className="details-summary">
-              <span>Total ticket</span>
-              <strong>{formatCurrencyDh(selectedSale.total || 0)}</strong>
+              <span>Net</span>
+              <strong>
+                {formatCurrencyDh(
+                  Number.isFinite(Number(selectedSale.net))
+                    ? Number(selectedSale.net)
+                    : getSaleNetProfit(selectedSale)
+                )}
+              </strong>
             </div>
           </>
         ) : null}
@@ -1353,9 +1951,6 @@ function SalesHistoryPage() {
               {saleToCancel.ticketNumber || saleToCancel.id}
             </p>
             <p className="delete-product-meta">
-              Magasin: {saleToCancel.storeName || saleToCancel.store?.name || "-"}
-            </p>
-            <p className="delete-product-meta">
               Total: {formatCurrencyDh(saleToCancel.total || 0)}
             </p>
           </div>
@@ -1363,110 +1958,122 @@ function SalesHistoryPage() {
       </Modal>
 
       <Modal
-        isOpen={Boolean(saleToPayCredit)}
-        eyebrow="Paiement credit"
+        isOpen={Boolean(saleToPay)}
+        eyebrow="Ajouter paiement"
         title={
-          saleToPayCredit
-            ? `Payer le credit de ${saleToPayCredit.customerName || "ce client"}`
-            : "Payer credit"
+          saleToPay
+            ? `Ajouter un paiement sur ${saleToPay.ticketNumber || saleToPay.id}`
+            : "Ajouter paiement"
         }
-        description="Enregistrez un paiement de credit directement depuis le ticket."
-        onClose={closeCreditPaymentModal}
+        description="Enregistrez un paiement sur une vente partiellement payee ou a credit."
+        onClose={closeSalePaymentModal}
         actions={
           <>
             <button
               className="ghost-button"
               type="button"
-              onClick={closeCreditPaymentModal}
-              disabled={isSubmittingCreditPayment}
+              onClick={closeSalePaymentModal}
+              disabled={isSubmittingSalePayment}
             >
               Annuler
             </button>
             <button
               className="primary-button"
               type="submit"
-              form="credit-payment-form"
-              disabled={isSubmittingCreditPayment}
+              form="sale-payment-form"
+              disabled={isSubmittingSalePayment}
             >
-              {isSubmittingCreditPayment
-                ? "Paiement..."
-                : "Confirmer paiement"}
+              {isSubmittingSalePayment ? "Paiement..." : "Valider paiement"}
             </button>
           </>
         }
       >
         <form
           className="form-grid"
-          id="credit-payment-form"
-          onSubmit={handleSubmitCreditPayment}
+          id="sale-payment-form"
+          onSubmit={handleSubmitSalePayment}
         >
-          {creditPaymentError ? (
-            <div className="inline-notice error">{creditPaymentError}</div>
+          {salePaymentError ? (
+            <div className="inline-notice error">{salePaymentError}</div>
           ) : null}
 
-          {saleToPayCredit ? (
-            <div className="delete-product-summary">
-              <p className="delete-product-name">
-                {saleToPayCredit.ticketNumber || saleToPayCredit.id}
-              </p>
-              <p className="delete-product-meta">
-                Client: {saleToPayCredit.customerName || "Client inconnu"}
-              </p>
-              <p className="delete-product-meta">
-                Credit actuel: {formatCurrencyDh(saleToPayCredit.customerCredit || 0)}
-              </p>
-              <p className="delete-product-meta">
-                Total ticket: {formatCurrencyDh(saleToPayCredit.total || 0)}
-              </p>
+          {saleToPay ? (
+            <div className="details-list">
+              <div className="detail-stat">
+                <span>Ticket</span>
+                <strong>{saleToPay.ticketNumber || saleToPay.id}</strong>
+              </div>
+              <div className="detail-stat">
+                <span>Total vente</span>
+                <strong>{formatCurrencyDh(saleToPay.total || 0)}</strong>
+              </div>
+              <div className="detail-stat">
+                <span>Montant deja paye</span>
+                <strong>{formatCurrencyDh(saleToPay.paidAmount || 0)}</strong>
+              </div>
+              <div className="detail-stat">
+                <span>Reste a payer</span>
+                <strong>{formatCurrencyDh(saleToPay.remainingAmount || 0)}</strong>
+              </div>
             </div>
           ) : null}
 
           <div className="field-group">
-            <label className="field-label" htmlFor="credit-payment-amount">
-              Montant paye
+            <label className="field-label" htmlFor="sale-payment-amount">
+              Montant recu
             </label>
             <input
-              id="credit-payment-amount"
+              id="sale-payment-amount"
               className="text-input"
               type="number"
               min="0.01"
               step="0.01"
-              max={Number(saleToPayCredit?.customerCredit || 0)}
-              value={creditPaymentAmount}
+              max={Number(saleToPay?.remainingAmount || 0)}
+              value={salePaymentAmount}
               onChange={(event) => {
-                setCreditPaymentError("");
-                setCreditPaymentAmount(event.target.value);
+                setSalePaymentError("");
+                setSalePaymentAmount(event.target.value);
               }}
             />
           </div>
 
           <div className="field-group">
-            <label className="field-label" htmlFor="credit-payment-note">
-              Note
+            <label className="field-label" htmlFor="sale-payment-method">
+              Mode paiement
             </label>
-            <textarea
-              id="credit-payment-note"
-              className="text-input"
-              rows="4"
-              value={creditPaymentNote}
+            <select
+              id="sale-payment-method"
+              className="text-input select-input"
+              value={salePaymentMethod}
               onChange={(event) => {
-                setCreditPaymentError("");
-                setCreditPaymentNote(event.target.value);
+                setSalePaymentError("");
+                setSalePaymentMethod(event.target.value);
               }}
-            />
+            >
+              <option value="cash">Especes</option>
+              <option value="card">Carte bancaire</option>
+            </select>
           </div>
         </form>
       </Modal>
 
       <Modal
         isOpen={Boolean(saleToReturn)}
-        eyebrow="Retour produits"
+        eyebrow={refundSelectionMode ? "Remboursement facture" : "Retour produits"}
         title={
           saleToReturn
-            ? `Retour sur ${saleToReturn.ticketNumber || saleToReturn.id}`
-            : "Retour produits"
+            ? refundSelectionMode
+              ? `Rembourser ${saleToReturn.ticketNumber || saleToReturn.id}`
+              : `Retour sur ${saleToReturn.ticketNumber || saleToReturn.id}`
+            : refundSelectionMode
+              ? "Remboursement facture"
+              : "Retour produits"
         }
-        description="Selectionnez les quantites a reintegrer en stock et precisez une raison si necessaire."
+        description={
+          refundSelectionMode
+            ? "Selectionnez les produits et quantites a rembourser. Le stock sera reintegre automatiquement."
+            : "Selectionnez les quantites a reintegrer en stock et precisez une raison si necessaire."
+        }
         onClose={closeReturnModal}
         actions={
           <>
@@ -1484,7 +2091,11 @@ function SalesHistoryPage() {
               form="sale-return-form"
               disabled={isSubmittingReturn}
             >
-              {isSubmittingReturn ? "Enregistrement..." : "Confirmer retour"}
+              {isSubmittingReturn
+                ? "Enregistrement..."
+                : refundSelectionMode
+                  ? "Valider remboursement"
+                  : "Confirmer retour"}
             </button>
           </>
         }
@@ -1497,28 +2108,32 @@ function SalesHistoryPage() {
           {(saleToReturn?.items || []).map((item) => {
             const productName =
               item.productName || item.name || item.product?.name || "-";
+            const itemKey = `${item.productId}-${item.variantId || 0}`;
+            const displayName = item.variantLabel
+              ? `${productName} / ${item.variantLabel}`
+              : productName;
             const maxQuantity = item.remainingReturnQuantity ?? item.quantity ?? 0;
 
             return (
-              <div className="delete-product-summary" key={item.productId || productName}>
-                <p className="delete-product-name">{productName}</p>
+              <div className="delete-product-summary" key={itemKey}>
+                <p className="delete-product-name">{displayName}</p>
                 <p className="delete-product-meta">
                   Vendu: {item.quantity || 0} | Deja retourne: {item.returnedQuantity || 0}
                 </p>
                 <div className="field-group compact-field">
-                  <label className="field-label" htmlFor={`return-quantity-${item.productId}`}>
+                  <label className="field-label" htmlFor={`return-quantity-${itemKey}`}>
                     Quantite a retourner
                   </label>
                   <input
-                    id={`return-quantity-${item.productId}`}
-                    className="text-input"
-                    type="number"
-                    min="0"
-                    max={maxQuantity}
-                    step="1"
-                    value={returnQuantities[item.productId] ?? ""}
+                    id={`return-quantity-${itemKey}`}
+                  className="text-input"
+                  type="number"
+                  min="0"
+                  step="0.25"
+                  max={maxQuantity}
+                  value={returnQuantities[itemKey] ?? ""}
                     onChange={(event) =>
-                      handleReturnQuantityChange(item.productId, event.target.value)
+                      handleReturnQuantityChange(itemKey, event.target.value)
                     }
                     placeholder={`Max ${maxQuantity}`}
                   />

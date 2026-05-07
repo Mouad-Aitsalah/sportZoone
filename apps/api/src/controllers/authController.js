@@ -122,6 +122,38 @@ const parseCaisseId = (value) => {
   return Number.isInteger(parsedValue) && parsedValue > 0 ? parsedValue : NaN;
 };
 
+const getSingleStoreContext = async (organisationId, db = prisma) => {
+  const pointDeVente = await db.pointDeVente.findFirst({
+    where: {
+      organisationId,
+    },
+    select: {
+      id: true,
+    },
+    orderBy: [{ id: "asc" }],
+  });
+
+  const caisse = pointDeVente
+    ? await db.caisse.findFirst({
+        where: {
+          organisationId,
+          pointDeVenteId: pointDeVente.id,
+        },
+        select: {
+          id: true,
+          pointDeVenteId: true,
+          estActive: true,
+        },
+        orderBy: [{ id: "asc" }],
+      })
+    : null;
+
+  return {
+    pointDeVente,
+    caisse,
+  };
+};
+
 const register = async (req, res) => {
   try {
     const parsedInput = validateSchema(authRegisterSchema, req.body);
@@ -147,8 +179,8 @@ const register = async (req, res) => {
     const userRole =
       ["ADMIN", "EMPLOYE"].includes(requestedRole) ? requestedRole : "EMPLOYE";
     const organisationId = getOrganisationIdFromUser(adminRequester);
-    const parsedPointDeVenteId = parsePointDeVenteId(pointDeVenteId);
-    const parsedCaisseId = parseCaisseId(caisseId);
+    let parsedPointDeVenteId = parsePointDeVenteId(pointDeVenteId);
+    let parsedCaisseId = parseCaisseId(caisseId);
 
     if (Number.isNaN(parsedPointDeVenteId)) {
       return res.status(400).json({
@@ -162,15 +194,22 @@ const register = async (req, res) => {
       });
     }
 
+    if (userRole === "EMPLOYE" && (!parsedPointDeVenteId || !parsedCaisseId)) {
+      const singleStoreContext = await getSingleStoreContext(organisationId);
+
+      parsedPointDeVenteId = parsedPointDeVenteId || singleStoreContext.pointDeVente?.id || null;
+      parsedCaisseId = parsedCaisseId || singleStoreContext.caisse?.id || null;
+    }
+
     if (userRole === "EMPLOYE" && !parsedPointDeVenteId) {
       return res.status(400).json({
-        message: "Un employe doit etre rattache a un point de vente.",
+        message: "Aucun magasin par defaut n'est disponible pour rattacher ce caissier.",
       });
     }
 
     if (userRole === "EMPLOYE" && !parsedCaisseId) {
       return res.status(400).json({
-        message: "Un employe doit etre rattache a une caisse.",
+        message: "Aucune caisse par defaut n'est disponible pour rattacher ce caissier.",
       });
     }
 

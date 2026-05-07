@@ -1,7 +1,9 @@
 const ExcelJS = require("exceljs");
+const bwipjs = require("bwip-js");
 const PDFDocument = require("pdfkit");
 const { Prisma } = require("@prisma/client");
 const prisma = require("../config/prisma");
+const { isValidEAN13 } = require("../utils/barcode");
 const { createHttpError } = require("../utils/httpError");
 const { getOrganisationIdFromUser } = require("../utils/organisationScope");
 
@@ -145,6 +147,23 @@ const getEmployeeStoreId = (user) => {
 
   return user.pointDeVenteId || null;
 };
+
+const getVariantBarcodeLabel = (variant) => {
+  const size = normalizeRequiredString(variant?.taille || "Unique") || "Unique";
+  const color = normalizeRequiredString(variant?.couleur || "");
+
+  return color ? `${size} / ${color}` : size;
+};
+
+const getBarcodeImageBuffer = async (barcode) =>
+  bwipjs.toBuffer({
+    bcid: isValidEAN13(barcode) ? "ean13" : "code128",
+    text: barcode,
+    scale: 2,
+    height: 12,
+    includetext: false,
+    backgroundcolor: "FFFFFF",
+  });
 
 const buildSalesWhereClause = (query, user) => {
   const organisationId = getOrganisationIdFromUser(user);
@@ -1311,9 +1330,192 @@ const exportStorePdf = async (req, res) => {
   doc.end();
 };
 
+const exportProductBarcodesPdf = async (req, res) => {
+  const organisationId = getOrganisationIdFromUser(req.user);
+  const mode = normalizeRequiredString(req.body?.mode || "products_and_variants");
+  const productId = parseOptionalPositiveInteger(req.body?.productId);
+
+  if (
+    ![
+      "all_products",
+      "selected_product",
+      "variants_only",
+      "products_and_variants",
+    ].includes(mode)
+  ) {
+    throw createHttpError(400, "mode invalide pour l'export des codes-barres.");
+  }
+
+  if (Number.isNaN(productId)) {
+    throw createHttpError(400, "productId doit etre un entier positif valide.");
+  }
+
+  if (mode === "selected_product" && !productId) {
+    throw createHttpError(400, "Veuillez selectionner un produit a exporter.");
+  }
+
+  const products = await prisma.produit.findMany({
+    where: {
+      organisationId,
+      ...(mode === "selected_product" && productId ? { id: productId } : {}),
+    },
+    include: {
+      variantes: {
+        where: {
+          actif: true,
+        },
+        orderBy: [{ id: "asc" }],
+      },
+    },
+    orderBy: [{ nom: "asc" }, { id: "asc" }],
+  });
+
+  if (!products.length) {
+    throw createHttpError(404, "Aucun produit disponible pour cet export.");
+  }
+
+  const items = [];
+
+  for (const product of products) {
+    if (mode === "all_products" || mode === "products_and_variants" || mode === "selected_product") {
+      items.push({
+        key: `product-${product.id}`,
+        name: product.nom,
+        subtitle: "Produit principal",
+        barcode: product.codeBarres,
+        isLegacyBarcode: !isValidEAN13(product.codeBarres),
+      });
+    }
+
+    if (mode === "variants_only" || mode === "products_and_variants" || mode === "selected_product") {
+      for (const variant of product.variantes || []) {
+        const variantBarcode = normalizeRequiredString(variant.codeBarres);
+
+        if (!variantBarcode) {
+          continue;
+        }
+
+        items.push({
+          key: `variant-${variant.id}`,
+          name: product.nom,
+          subtitle: getVariantBarcodeLabel(variant),
+          barcode: variantBarcode,
+          isLegacyBarcode: !isValidEAN13(variantBarcode),
+        });
+      }
+    }
+  }
+
+  if (!items.length) {
+    throw createHttpError(404, "Aucun code-barres disponible pour cet export.");
+  }
+
+  const doc = new PDFDocument({
+    size: "A4",
+    margin: 32,
+  });
+  const labelWidth = 168;
+  const labelHeight = 118;
+  const columnGap = 12;
+  const rowGap = 14;
+  const availableWidth =
+    doc.page.width - doc.page.margins.left - doc.page.margins.right;
+  const availableHeight =
+    doc.page.height - doc.page.margins.top - doc.page.margins.bottom;
+  const columns = Math.max(
+    1,
+    Math.floor((availableWidth + columnGap) / (labelWidth + columnGap))
+  );
+  const rowsPerPage = Math.max(
+    1,
+    Math.floor((availableHeight + rowGap) / (labelHeight + rowGap))
+  );
+  const itemsPerPage = columns * rowsPerPage;
+  const startX = doc.page.margins.left;
+  const startY = doc.page.margins.top;
+
+  doc.info.Title = "Export codes-barres produits";
+  doc.info.Author = "SportZone";
+
+  for (const [index, item] of items.entries()) {
+    if (index > 0 && index % itemsPerPage === 0) {
+      doc.addPage();
+    }
+
+    const positionInPage = index % itemsPerPage;
+    const columnIndex = positionInPage % columns;
+    const rowIndex = Math.floor(positionInPage / columns);
+    const x = startX + columnIndex * (labelWidth + columnGap);
+    const y = startY + rowIndex * (labelHeight + rowGap);
+
+    doc
+      .roundedRect(x, y, labelWidth, labelHeight, 10)
+      .lineWidth(1)
+      .strokeColor("#D6E0EC")
+      .stroke();
+
+    doc
+      .font("Helvetica-Bold")
+      .fontSize(11)
+      .fillColor("#102033")
+      .text(item.name, x + 10, y + 10, {
+        width: labelWidth - 20,
+        height: 26,
+        ellipsis: true,
+      });
+
+    doc
+      .font("Helvetica")
+      .fontSize(9)
+      .fillColor("#5F6C7B")
+      .text(item.subtitle, x + 10, y + 34, {
+        width: labelWidth - 20,
+      });
+
+    const barcodeBuffer = await getBarcodeImageBuffer(item.barcode);
+    doc.image(barcodeBuffer, x + 14, y + 48, {
+      fit: [labelWidth - 28, 34],
+      align: "center",
+      valign: "center",
+    });
+
+    doc
+      .font("Helvetica-Bold")
+      .fontSize(11)
+      .fillColor("#102033")
+      .text(item.barcode, x + 10, y + 88, {
+        width: labelWidth - 20,
+        align: "center",
+      });
+
+    if (item.isLegacyBarcode) {
+      doc
+        .font("Helvetica")
+        .fontSize(7)
+        .fillColor("#B45309")
+        .text("Code historique exporte en compatibilite.", x + 10, y + 103, {
+          width: labelWidth - 20,
+          align: "center",
+        });
+    }
+  }
+
+  const filename =
+    mode === "selected_product" && products[0]
+      ? `codes-barres-${String(products[0].nom || "produit")
+          .trim()
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/gi, "-")
+          .replace(/^-+|-+$/g, "") || "produit"}.pdf`
+      : "codes-barres-produits.pdf";
+
+  return sendPdfDocument(res, doc, filename);
+};
+
 module.exports = {
   exportSalesExcel,
   exportSalesPdf,
+  exportProductBarcodesPdf,
   exportReportExcel,
   exportReportPdf,
   exportStoreExcel,

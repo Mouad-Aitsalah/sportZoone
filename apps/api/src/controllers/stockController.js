@@ -19,12 +19,12 @@ const parseStockQuantity = (value, { min }) => {
   }
 
   const parsedValue = Number(value);
-  return Number.isInteger(parsedValue) && parsedValue >= min ? parsedValue : NaN;
+  return Number.isFinite(parsedValue) && parsedValue >= min ? parsedValue : NaN;
 };
 
-const parsePositiveInteger = (value) => parseStockQuantity(value, { min: 1 });
+const parsePositiveQuantity = (value) => parseStockQuantity(value, { min: 0.000001 });
 
-const parseNonNegativeInteger = (value) => {
+const parseNonNegativeQuantity = (value) => {
   return parseStockQuantity(value, { min: 0 });
 };
 
@@ -187,7 +187,7 @@ const stockEntry = async (req, res) => {
     const organisationId = getOrganisationIdFromUser(req.user);
     const produitId = parseId(req.body.produitId);
     const pointDeVenteId = parseId(req.body.pointDeVenteId);
-    const quantite = parsePositiveInteger(req.body.quantite);
+    const quantite = parsePositiveQuantity(req.body.quantite);
 
     if (!produitId || !pointDeVenteId || Number.isNaN(quantite)) {
       return res.status(400).json({
@@ -318,7 +318,7 @@ const updateStock = async (req, res) => {
   try {
     const organisationId = getOrganisationIdFromUser(req.user);
     const stockId = parseId(req.params.id);
-    const quantite = parseNonNegativeInteger(req.body.quantite);
+    const quantite = parseNonNegativeQuantity(req.body.quantite);
 
     if (!stockId) {
       return res.status(400).json({

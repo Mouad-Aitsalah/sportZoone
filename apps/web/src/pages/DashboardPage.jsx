@@ -6,7 +6,6 @@ import Modal from "../components/Modal";
 import PageHeader from "../components/PageHeader";
 import SalesLineChart from "../components/charts/SalesLineChart";
 import SalesPieChart from "../components/charts/SalesPieChart";
-import StoreBarChart from "../components/charts/StoreBarChart";
 import TopProductsChart from "../components/charts/TopProductsChart";
 import SectionCard from "../components/SectionCard";
 import StatCard from "../components/StatCard";
@@ -79,19 +78,6 @@ function DashboardPage() {
     () => new Set(stores.map((store) => String(store.name || "").trim()).filter(Boolean)),
     [stores]
   );
-  const scopedSalesByStore = useMemo(() => {
-    if (!analytics?.salesByStore?.length) {
-      return [];
-    }
-
-    if (!scopedStoreNames.size) {
-      return analytics.salesByStore;
-    }
-
-    return analytics.salesByStore.filter((item) =>
-      scopedStoreNames.has(String(item.store || "").trim())
-    );
-  }, [analytics, scopedStoreNames]);
   const scopedAlerts = useMemo(() => {
     if (!alerts.length) {
       return [];
@@ -152,13 +138,13 @@ function DashboardPage() {
         tone: "default",
       },
       {
-        label: "Meilleur magasin",
+        label: "Magasin suivi",
         value: isLoading
           ? "Chargement..."
-          : resolvedBestStore?.name || "Aucune donnee",
+          : resolvedBestStore?.name || "SportZone",
         detail: resolvedBestStore
           ? `${formatCurrencyDh(resolvedBestStore.revenue || 0)} sur la periode.`
-          : "Aucune vente valide enregistree pour cette periode.",
+          : "Le magasin unique SportZone sera affiche ici.",
         tone: "warning",
       },
     ],
@@ -170,7 +156,7 @@ function DashboardPage() {
       <PageHeader
         eyebrow="Overview"
         title="Dashboard"
-        description="Suivre la performance commerciale, les tendances de ventes et les alertes stock du reseau en temps reel."
+        description="Suivre la performance commerciale, les tendances de ventes et les alertes stock du magasin SportZone."
         actions={
           <>
             <div className="period-selector">
@@ -216,7 +202,7 @@ function DashboardPage() {
 
       <SectionCard
         title="Alertes stock"
-        description="Produits en rupture ou sous seuil minimum dans le reseau."
+        description="Produits en rupture ou sous seuil minimum dans le magasin SportZone."
         actions={
           <button
             className="ghost-button"
@@ -280,19 +266,6 @@ function DashboardPage() {
 
       <div className="analytics-grid">
         <SectionCard
-          title="Comparaison entre magasins"
-          description="Comparer les ventes des points de vente reels suivis par l'application."
-          className="analytics-card"
-        >
-          <StoreBarChart
-            data={scopedSalesByStore}
-            loading={isLoading}
-            emptyTitle="Aucune comparaison disponible"
-            emptyDescription={emptySalesMessage}
-          />
-        </SectionCard>
-
-        <SectionCard
           title="Repartition par categorie"
           description="Poids des categories reelles dans le chiffre d'affaires."
           className="analytics-card"
@@ -304,21 +277,20 @@ function DashboardPage() {
             emptyDescription={emptySalesMessage}
           />
         </SectionCard>
+        <SectionCard
+          title="Top produits"
+          description="Produits reels les plus vendus en quantite sur la periode selectionnee."
+          className="analytics-card"
+        >
+          <TopProductsChart
+            data={analytics?.topProducts || []}
+            loading={isLoading}
+            limit={5}
+            emptyTitle="Aucun produit vendu"
+            emptyDescription={emptySalesMessage}
+          />
+        </SectionCard>
       </div>
-
-      <SectionCard
-        title="Top produits"
-        description="Produits reels les plus vendus en quantite sur la periode selectionnee."
-        className="analytics-card"
-      >
-        <TopProductsChart
-          data={analytics?.topProducts || []}
-          loading={isLoading}
-          limit={5}
-          emptyTitle="Aucun produit vendu"
-          emptyDescription={emptySalesMessage}
-        />
-      </SectionCard>
 
       <Modal
         isOpen={isAlertsModalOpen}
@@ -355,7 +327,6 @@ function DashboardPage() {
           <DataTable
             columns={[
               { key: "product", label: "Produit" },
-              { key: "store", label: "Magasin" },
               { key: "quantity", label: "Quantite" },
               { key: "minimumThreshold", label: "Seuil minimum" },
               { key: "status", label: "Statut" },
@@ -377,7 +348,6 @@ function DashboardPage() {
                 }
               >
                 <td>{item.produitNom}</td>
-                <td>{item.magasin}</td>
                 <td>{item.quantite}</td>
                 <td>{item.seuilMinimum}</td>
                 <td>

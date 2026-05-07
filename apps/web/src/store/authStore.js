@@ -16,11 +16,19 @@ function buildDisplayName(email) {
 function normalizeRole(role) {
   const normalizedRole = String(role || "").trim().toLowerCase();
 
+  if (normalizedRole === "super_admin" || normalizedRole === "super-admin") {
+    return "super_admin";
+  }
+
+  if (normalizedRole === "admin_global" || normalizedRole === "admin-global") {
+    return "admin_global";
+  }
+
   if (normalizedRole === "admin") {
     return "admin";
   }
 
-  if (["employee", "employe"].includes(normalizedRole)) {
+  if (["employee", "employe", "caissier", "cashier"].includes(normalizedRole)) {
     return "employe";
   }
 
@@ -34,6 +42,8 @@ function normalizeUser(user) {
     user.storeId ?? user.pointDeVenteId ?? user.pointDeVente?.id ?? null;
   const storeName =
     user.storeName ?? user.pointDeVente?.nom ?? user.store?.name ?? null;
+  const organisationName =
+    user.organisationName ?? user.organisation?.name ?? user.organisation?.nom ?? null;
   const cashRegisterId = user.cashRegisterId ?? user.caisseId ?? user.caisse?.id ?? null;
   const cashRegisterName =
     user.cashRegisterName ?? user.caisse?.nom ?? user.cashRegister?.name ?? null;
@@ -43,6 +53,7 @@ function normalizeUser(user) {
     email,
     name,
     role: normalizeRole(user.role),
+    organisationName,
     storeId,
     storeName,
     cashRegisterId,
@@ -86,6 +97,14 @@ export function saveAuthSession(token, user) {
 export function getCurrentUser() {
   const user = readAuthState()?.user;
   return user ? normalizeUser(user) : null;
+}
+
+export function isAdminRole(role) {
+  return normalizeRole(role) === "admin";
+}
+
+export function isCashierRole(role) {
+  return normalizeRole(role) === "employe";
 }
 
 export function getAuthToken() {

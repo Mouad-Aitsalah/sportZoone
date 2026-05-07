@@ -1,6 +1,8 @@
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import sportZoneLogo from "../assets/sportzone-logo.jpeg";
 import { getCurrentUser, logout } from "../store/authStore";
 import { ROUTE_PATHS } from "../routes/paths";
+
 
 const navigationItems = [
   {
@@ -32,11 +34,11 @@ const navigationItems = [
     roles: ["admin", "employe"],
   },
   {
-    label: "Suppliers / Fournisseurs",
-    description: "Contacts et partenaires fournisseurs.",
-    path: ROUTE_PATHS.SUPPLIERS,
+    label: "Comptes",
+    description: "Clients centralises.",
+    path: ROUTE_PATHS.COMPTES,
     index: "05",
-    roles: ["admin"],
+    roles: ["admin", "employe"],
   },
   {
     label: "Sales History / Historique ventes",
@@ -60,25 +62,25 @@ const navigationItems = [
     roles: ["admin"],
   },
   {
-    label: "Stores / Points de vente",
-    description: "Performance des points de vente.",
-    path: ROUTE_PATHS.STORES,
+    label: "Organisations",
+    description: "Creer et piloter les organisations SportZone.",
+    path: ROUTE_PATHS.ORGANISATIONS,
     index: "09",
-    roles: ["admin"],
+    roles: ["super_admin", "admin_global"],
   },
   {
-    label: "Clients",
-    description: "Achats, credits et profils clients.",
-    path: ROUTE_PATHS.CUSTOMERS,
-    index: "10",
-    roles: ["admin", "employe"],
+    label: "Achat / Achats",
+    description: "Achats aupres des fournisseurs.",
+    path: ROUTE_PATHS.PURCHASES,
+    index: "11",
+    roles: ["admin"],
   },
 ];
 
 const sectionHighlights = {
   [ROUTE_PATHS.DASHBOARD]: {
-    title: "Pilotage multi-magasins",
-    subtitle: "Suivi en temps reel des ventes et de la disponibilite stock.",
+    title: "Pilotage du magasin",
+    subtitle: "Suivi en temps reel des ventes et du stock SportZone.",
   },
   [ROUTE_PATHS.POS]: {
     title: "Encaissement rapide",
@@ -92,9 +94,9 @@ const sectionHighlights = {
     title: "Controle stock",
     subtitle: "Identifier les seuils critiques et corriger rapidement.",
   },
-  [ROUTE_PATHS.SUPPLIERS]: {
-    title: "Gestion fournisseurs",
-    subtitle: "Conserver les contacts et le portefeuille d'approvisionnement.",
+  [ROUTE_PATHS.COMPTES]: {
+    title: "Gestion des clients",
+    subtitle: "Centraliser les clients du magasin dans un seul module.",
   },
   [ROUTE_PATHS.SALES]: {
     title: "Tracabilite des ventes",
@@ -108,13 +110,13 @@ const sectionHighlights = {
     title: "Gestion equipe",
     subtitle: "Suivre les utilisateurs, roles et statuts d'activite.",
   },
-  [ROUTE_PATHS.STORES]: {
-    title: "Reseau de magasins",
-    subtitle: "Surveiller les points de vente et leur revenu du jour.",
+  [ROUTE_PATHS.ORGANISATIONS]: {
+    title: "Gestion des organisations",
+    subtitle: "Creer de nouvelles organisations et suivre leur structure.",
   },
-  [ROUTE_PATHS.CUSTOMERS]: {
-    title: "Gestion clients",
-    subtitle: "Suivre les profils, achats et credits de chaque client.",
+  [ROUTE_PATHS.PURCHASES]: {
+    title: "Gestion des achats",
+    subtitle: "Enregistrer les approvisionnements fournisseurs et leur impact magasin.",
   },
 };
 
@@ -140,12 +142,26 @@ function MainLayout() {
         .slice(0, 2)
         .toUpperCase()
     : "MP";
+  const displayRole =
+    currentUser?.role === "super_admin"
+      ? "super admin"
+      : currentUser?.role === "admin_global"
+      ? "admin global"
+      : currentUser?.role === "admin"
+      ? "admin"
+      : "caissier";
+  const organisationName = currentUser?.organisationName || currentUser?.storeName || "SportZone";
   const accessLabel =
-    currentUser?.role === "admin"
-      ? "Global access"
-      : [currentUser?.storeName, currentUser?.cashRegisterName]
+    currentUser?.role === "super_admin" || currentUser?.role === "admin_global"
+      ? "Pilotage global SportZone"
+      : currentUser?.role === "admin"
+      ? organisationName
+      : [
+          currentUser?.storeName || organisationName,
+          currentUser?.cashRegisterName || "Caisse 1",
+        ]
           .filter(Boolean)
-          .join(" - ") || "Affectation en attente";
+          .join(" - ") || organisationName;
 
   const handleLogout = () => {
     logout();
@@ -156,11 +172,23 @@ function MainLayout() {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand-block">
-          <span className="brand-badge">4 Points de vente actifs</span>
-          <h1 className="brand-title">Multi-POS Manager</h1>
+          <img
+            className="brand-logo"
+            src={sportZoneLogo}
+            alt="SportZone"
+            style={{
+              display: "block",
+              width: "78px",
+              maxWidth: "100%",
+              height: "auto",
+              margin: "0 auto 14px",
+            }}
+          />
+          <span className="brand-badge">{organisationName}</span>
+          <h1 className="brand-title">SportZone Manager</h1>
           <p className="brand-subtitle">
-            Centraliser les ventes, le stock, les utilisateurs et la caisse sur
-            l'ensemble du reseau.
+            Centraliser les ventes, le stock, les clients, les utilisateurs et
+            la caisse de l'organisation connectee.
           </p>
         </div>
 
@@ -185,8 +213,8 @@ function MainLayout() {
         <div className="sidebar-note">
           <h3>Operations Pulse</h3>
           <p>
-            Stock, tickets, fournisseurs et performances sont accessibles depuis
-            une meme interface.
+            Stock, tickets, clients et performances sont accessibles depuis une
+            meme interface.
           </p>
         </div>
       </aside>
@@ -211,7 +239,7 @@ function MainLayout() {
                     <p className="topbar-value">
                       {currentUser?.name || "Demo User"}
                     </p>
-                    <p className="topbar-meta">{currentUser?.role || "employe"}</p>
+                    <p className="topbar-meta">{displayRole}</p>
                     <p className="topbar-meta">{accessLabel}</p>
                   </div>
                 </div>
@@ -231,9 +259,9 @@ function MainLayout() {
                 <div className="header-card-row">
                   <div>
                     <p className="topbar-label">Business snapshot</p>
-                    <p className="topbar-value">4 magasins suivis</p>
+                    <p className="topbar-value">{organisationName}</p>
                   </div>
-                  <span className="header-card-aside">Reseau actif</span>
+                  <span className="header-card-aside">Organisation active</span>
                 </div>
               </div>
 

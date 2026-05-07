@@ -97,6 +97,12 @@ a {
   gap: 12px;
 }
 
+.brand-logo {
+  display: block;
+  width: 60px;
+  height: auto;
+}
+
 .brand-badge {
   width: fit-content;
   padding: 8px 14px;
@@ -789,6 +795,78 @@ a {
   font-size: 13px;
 }
 
+.product-variant-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.variant-toggle-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-strong);
+  color: var(--secondary);
+  cursor: pointer;
+  transition: transform 0.2s ease, background 0.2s ease, border-color 0.2s ease;
+}
+
+.variant-toggle-button:hover {
+  border-color: rgba(22, 89, 181, 0.24);
+  background: rgba(22, 89, 181, 0.08);
+}
+
+.variant-toggle-button.expanded .variant-toggle-chevron {
+  transform: rotate(180deg);
+}
+
+.variant-toggle-chevron {
+  display: inline-block;
+  transition: transform 0.2s ease;
+}
+
+.variant-detail-row td {
+  padding: 0;
+  background: rgba(22, 89, 181, 0.03);
+}
+
+.variant-subtable-shell {
+  padding: 12px 16px 16px;
+}
+
+.variant-subtable {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--surface-strong);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  overflow: hidden;
+}
+
+.variant-subtable th,
+.variant-subtable td {
+  padding: 12px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+.variant-subtable th {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-soft);
+  background: #f9fbfd;
+}
+
+.variant-subtable tbody tr:last-child td {
+  border-bottom: none;
+}
+
 .status-badge,
 .stock-chip {
   display: inline-flex;
@@ -933,6 +1011,13 @@ a {
   align-self: center;
 }
 
+.login-logo {
+  display: block;
+  width: 90px;
+  height: auto;
+  margin: 0 auto 18px;
+}
+
 .login-card-eyebrow {
   margin: 0;
   color: var(--secondary);
@@ -1024,6 +1109,127 @@ a {
   gap: 14px;
 }
 
+.variant-builder-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.variant-builder-panel {
+  display: grid;
+  gap: 18px;
+  padding: 18px;
+  border: 1px dashed var(--border);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.variant-mode-row,
+.variant-chip-grid,
+.variant-inline-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.variant-builder-block {
+  display: grid;
+  gap: 12px;
+}
+
+.variant-chip {
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-strong);
+  color: var(--text);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.variant-chip.active {
+  border-color: rgba(22, 89, 181, 0.28);
+  background: rgba(22, 89, 181, 0.12);
+  color: var(--primary-strong);
+}
+
+.variant-inline-form .text-input {
+  flex: 1 1 220px;
+}
+
+.variant-inline-form.end {
+  justify-content: flex-end;
+}
+
+.product-modal {
+  width: min(1380px, 96vw);
+}
+
+.product-variant-edit-wrap {
+  overflow-x: auto;
+}
+
+.product-variant-edit-table {
+  min-width: 1120px;
+  table-layout: fixed;
+}
+
+.product-variant-edit-table th,
+.product-variant-edit-table td {
+  padding: 12px 10px;
+  vertical-align: middle;
+}
+
+.product-variant-edit-table th:nth-child(1),
+.product-variant-edit-table td:nth-child(1),
+.product-variant-edit-table th:nth-child(2),
+.product-variant-edit-table td:nth-child(2) {
+  width: 110px;
+}
+
+.product-variant-edit-table th:nth-child(3),
+.product-variant-edit-table td:nth-child(3) {
+  width: 180px;
+}
+
+.product-variant-edit-table th:nth-child(4),
+.product-variant-edit-table td:nth-child(4),
+.product-variant-edit-table th:nth-child(5),
+.product-variant-edit-table td:nth-child(5) {
+  width: 130px;
+}
+
+.product-variant-edit-table th:nth-child(6),
+.product-variant-edit-table td:nth-child(6),
+.product-variant-edit-table th:nth-child(7),
+.product-variant-edit-table td:nth-child(7) {
+  width: 110px;
+}
+
+.product-variant-edit-table th:nth-child(8),
+.product-variant-edit-table td:nth-child(8) {
+  width: 90px;
+  text-align: center;
+}
+
+.product-variant-edit-table th:nth-child(9),
+.product-variant-edit-table td:nth-child(9) {
+  width: 110px;
+  text-align: center;
+}
+
+.variant-input {
+  min-width: 0;
+  padding: 12px 14px;
+}
+
+.variant-barcode-text {
+  display: block;
+  font-size: 13px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
 .text-input {
   width: 100%;
   padding: 14px 16px;
@@ -1054,6 +1260,24 @@ a {
   padding-top: 20px;
   border-top: 1px solid var(--border);
   color: var(--text-soft);
+}
+
+.pos-page-shell {
+  display: grid;
+  gap: 18px;
+}
+
+.pos-page-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.pos-page-title {
+  margin: 0;
+  font-size: 30px;
+  line-height: 1.05;
 }
 
 .pos-layout {
@@ -1087,6 +1311,37 @@ a {
 .inline-notice.error {
   color: #9b2f2b;
   background: var(--error-bg);
+}
+
+.import-products-form {
+  display: grid;
+  gap: 18px;
+}
+
+.import-file-input {
+  padding-block: 10px;
+}
+
+.import-result-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.import-error-list ul {
+  margin: 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 8px;
+}
+
+.sales-refund-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.sales-refund-action {
+  padding-inline: 16px;
 }
 
 .product-hint-list {
@@ -1125,6 +1380,11 @@ a {
   gap: 10px;
 }
 
+.cart-quantity-input {
+  width: 92px;
+  text-align: center;
+}
+
 .quantity-button {
   min-width: 38px;
   padding: 10px 0;
@@ -1138,6 +1398,11 @@ a {
 .cart-price-block span {
   display: block;
   margin-bottom: 6px;
+}
+
+.cart-price-input {
+  width: 110px;
+  margin: 6px 0 8px;
 }
 
 .cart-summary {
@@ -1395,6 +1660,10 @@ a {
   margin-top: 18px;
 }
 
+.pos-session-summary {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .embedded-section-card {
   margin-top: 20px;
 }
@@ -1479,6 +1748,173 @@ a {
   background: linear-gradient(135deg, var(--secondary), #4a8de8);
 }
 
+.purchase-voucher {
+  display: grid;
+  gap: 22px;
+}
+
+.purchase-voucher-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.purchase-voucher-eyebrow {
+  margin: 0;
+  color: var(--secondary);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.purchase-voucher-title {
+  margin: 8px 0 0;
+  font-size: 28px;
+}
+
+.purchase-voucher-number {
+  display: grid;
+  gap: 6px;
+  min-width: 220px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--surface-muted);
+  text-align: right;
+}
+
+.purchase-voucher-number span {
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.purchase-voucher-number strong {
+  font-size: 24px;
+}
+
+.purchase-voucher-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.purchase-voucher-grid-span {
+  grid-column: 1 / -1;
+}
+
+.purchase-voucher-table-wrap {
+  display: grid;
+  gap: 16px;
+}
+
+.purchase-voucher-table-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.purchase-voucher-table-shell {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--surface-strong);
+}
+
+.purchase-voucher-table {
+  width: 100%;
+  min-width: 1600px;
+  border-collapse: collapse;
+}
+
+.purchase-voucher-table th,
+.purchase-voucher-table td {
+  padding: 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.purchase-voucher-table th {
+  background: #f9fbfd;
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-align: left;
+}
+
+.purchase-voucher-table td .text-input {
+  min-width: 120px;
+  padding: 12px 14px;
+}
+
+.purchase-voucher-table td:nth-child(2) .text-input {
+  min-width: 220px;
+}
+
+.purchase-voucher-cell-total {
+  min-height: 50px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.purchase-voucher-footer {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+
+.purchase-voucher-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.purchase-voucher-totals {
+  min-width: 320px;
+  display: grid;
+  gap: 12px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: var(--surface-muted);
+}
+
+.purchase-voucher-total-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.purchase-voucher-total-row span {
+  color: var(--text-soft);
+  font-weight: 700;
+}
+
+.purchase-voucher-total-row strong {
+  font-size: 18px;
+}
+
+.purchase-voucher-total-row.grand strong {
+  font-size: 26px;
+}
+
 @media (max-width: 1280px) {
   .card-grid,
   .analytics-grid,
@@ -1523,6 +1959,7 @@ a {
   .page-header,
   .topbar-actions,
   .filter-row,
+  .pos-page-heading,
   .table-toolbar,
   .pos-toolbar,
   .action-row,
@@ -1568,6 +2005,21 @@ a {
 
   .table-action-row {
     flex-direction: column;
+  }
+
+  .purchase-voucher-header,
+  .purchase-voucher-table-toolbar,
+  .purchase-voucher-footer {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .purchase-voucher-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .purchase-voucher-totals {
+    min-width: 0;
   }
 }
 

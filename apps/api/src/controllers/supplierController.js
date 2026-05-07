@@ -1,57 +1,41 @@
 const prisma = require("../config/prisma");
 const { validateSchema } = require("../utils/validation");
+const { createHttpError } = require("../utils/httpError");
 const { getOrganisationIdFromUser } = require("../utils/organisationScope");
 const {
   supplierCreateSchema,
   supplierUpdateSchema,
 } = require("../utils/validationSchemas");
+const {
+  COMPTE_TYPES,
+  compteInclude,
+  normalizeOptionalString,
+  buildNextNumeroCompte,
+  toApiSupplierFromCompte,
+  resolveSupplierCompte,
+} = require("../services/compteService");
 
 const parseId = (value) => {
   const parsedValue = Number(value);
   return Number.isInteger(parsedValue) && parsedValue > 0 ? parsedValue : null;
 };
 
-const normalizeOptionalString = (value) => {
-  if (value === undefined) {
-    return undefined;
-  }
-
-  if (value === null) {
-    return null;
-  }
-
-  const normalizedValue = String(value).trim();
-  return normalizedValue === "" ? null : normalizedValue;
-};
-
-const supplierInclude = {
-  produits: {
-    select: {
-      id: true,
-      nom: true,
-      codeBarres: true,
-      categorie: true,
-      prixVente: true,
-      estActif: true,
-    },
-  },
-};
-
 const getAllSuppliers = async (req, res) => {
   try {
     const organisationId = getOrganisationIdFromUser(req.user);
-    const fournisseurs = await prisma.fournisseur.findMany({
+    const fournisseurs = await prisma.compte.findMany({
       where: {
         organisationId,
+        type: COMPTE_TYPES.FOURNISSEUR,
       },
-      include: supplierInclude,
+      include: compteInclude,
       orderBy: {
         id: "desc",
       },
     });
 
     return res.status(200).json({
-      suppliers: fournisseurs,
+      suppliers: fournisseurs.map(toApiSupplierFromCompte),
     });
   } catch (error) {
     console.error("Get suppliers error:", error);
@@ -72,12 +56,13 @@ const getSupplierById = async (req, res) => {
       });
     }
 
-    const fournisseur = await prisma.fournisseur.findFirst({
+    const fournisseur = await prisma.compte.findFirst({
       where: {
         organisationId,
         id: supplierId,
+        type: COMPTE_TYPES.FOURNISSEUR,
       },
-      include: supplierInclude,
+      include: compteInclude,
     });
 
     if (!fournisseur) {
@@ -87,7 +72,7 @@ const getSupplierById = async (req, res) => {
     }
 
     return res.status(200).json({
-      supplier: fournisseur,
+      supplier: toApiSupplierFromCompte(fournisseur),
     });
   } catch (error) {
     console.error("Get supplier by id error:", error);
@@ -109,35 +94,42 @@ const createSupplier = async (req, res) => {
     const normalizedTelephone = normalizeOptionalString(telephone);
     const normalizedAdresse = normalizeOptionalString(adresse);
 
-    if (normalizedEmail) {
-      const existingSupplier = await prisma.fournisseur.findFirst({
-        where: {
+    const fournisseur = await prisma.$transaction(async (tx) => {
+      const numeroCompte = await buildNextNumeroCompte(
+        tx,
+        organisationId,
+        COMPTE_TYPES.FOURNISSEUR
+      );
+
+      const createdSupplier = await tx.fournisseur.create({
+        data: {
           organisationId,
-          email: normalizedEmail,
+          nom: String(nom).trim(),
+          email: normalizedEmail || null,
+          telephone: normalizedTelephone,
+          adresse: normalizedAdresse,
         },
       });
 
-      if (existingSupplier) {
-        return res.status(409).json({
-          message: "Un fournisseur avec cet email existe deja.",
-        });
-      }
-    }
-
-    const fournisseur = await prisma.fournisseur.create({
-      data: {
-        organisationId,
-        nom: String(nom).trim(),
-        email: normalizedEmail || null,
-        telephone: normalizedTelephone,
-        adresse: normalizedAdresse,
-      },
-      include: supplierInclude,
+      return tx.compte.create({
+        data: {
+          organisationId,
+          numeroCompte,
+          type: COMPTE_TYPES.FOURNISSEUR,
+          nom: String(nom).trim(),
+          email: normalizedEmail || null,
+          telephone: normalizedTelephone,
+          adresse: normalizedAdresse,
+          actif: true,
+          fournisseurSourceId: createdSupplier.id,
+        },
+        include: compteInclude,
+      });
     });
 
     return res.status(201).json({
       message: "Fournisseur cree avec succes.",
-      supplier: fournisseur,
+      supplier: toApiSupplierFromCompte(fournisseur),
     });
   } catch (error) {
     if (error?.status) {
@@ -164,78 +156,46 @@ const updateSupplier = async (req, res) => {
       });
     }
 
-    const existingSupplier = await prisma.fournisseur.findFirst({
-      where: {
-        organisationId,
-        id: supplierId,
-      },
-    });
-
-    if (!existingSupplier) {
-      return res.status(404).json({
-        message: "Fournisseur introuvable.",
-      });
-    }
-
+    const existingSupplier = await resolveSupplierCompte(prisma, organisationId, supplierId);
     const { nom, email, telephone, adresse } = validateSchema(
       supplierUpdateSchema,
       req.body
     );
+
     const data = {};
-
     if (nom !== undefined) {
-      const normalizedNom = String(nom).trim();
-
-      if (!normalizedNom) {
-        return res.status(400).json({
-          message: "Le nom du fournisseur ne peut pas etre vide.",
-        });
-      }
-
-      data.nom = normalizedNom;
+      data.nom = String(nom).trim();
     }
-
     if (email !== undefined) {
-      const normalizedEmail = normalizeOptionalString(email)?.toLowerCase() || null;
-
-      if (normalizedEmail) {
-        const supplierWithSameEmail = await prisma.fournisseur.findFirst({
-          where: {
-            organisationId,
-            email: normalizedEmail,
-            id: {
-              not: supplierId,
-            },
-          },
-        });
-
-        if (supplierWithSameEmail) {
-          return res.status(409).json({
-            message: "Un autre fournisseur avec cet email existe deja.",
-          });
-        }
-      }
-
-      data.email = normalizedEmail;
+      data.email = normalizeOptionalString(email)?.toLowerCase() || null;
     }
-
     if (telephone !== undefined) {
-      data.telephone = normalizeOptionalString(telephone);
+      data.telephone = normalizeOptionalString(telephone) || null;
     }
-
     if (adresse !== undefined) {
-      data.adresse = normalizeOptionalString(adresse);
+      data.adresse = normalizeOptionalString(adresse) || null;
     }
 
-    const fournisseur = await prisma.fournisseur.update({
-      where: { id: supplierId },
-      data,
-      include: supplierInclude,
+    const fournisseur = await prisma.$transaction(async (tx) => {
+      await tx.fournisseur.update({
+        where: {
+          id: existingSupplier.fournisseurSource.id,
+        },
+        data,
+      });
+
+      return tx.compte.update({
+        where: {
+          id: existingSupplier.id,
+        },
+        data,
+        include: compteInclude,
+      });
     });
 
     return res.status(200).json({
       message: "Fournisseur mis a jour avec succes.",
-      supplier: fournisseur,
+      supplier: toApiSupplierFromCompte(fournisseur),
     });
   } catch (error) {
     if (error?.status) {
@@ -262,34 +222,32 @@ const deleteSupplier = async (req, res) => {
       });
     }
 
-    const existingSupplier = await prisma.fournisseur.findFirst({
-      where: {
-        organisationId,
-        id: supplierId,
-      },
-      include: {
-        _count: {
-          select: {
-            produits: true,
-          },
-        },
-      },
-    });
+    const existingSupplier = await resolveSupplierCompte(prisma, organisationId, supplierId);
 
-    if (!existingSupplier) {
-      return res.status(404).json({
-        message: "Fournisseur introuvable.",
-      });
-    }
-
-    if (existingSupplier._count.produits > 0) {
+    if ((existingSupplier.fournisseurSource?._count?.produits || 0) > 0) {
       return res.status(409).json({
         message: "Impossible de supprimer ce fournisseur car il est lie a des produits.",
       });
     }
 
-    await prisma.fournisseur.delete({
-      where: { id: supplierId },
+    if ((existingSupplier.fournisseurSource?._count?.achats || 0) > 0) {
+      return res.status(409).json({
+        message: "Impossible de supprimer ce fournisseur car il est deja lie a des achats.",
+      });
+    }
+
+    await prisma.$transaction(async (tx) => {
+      await tx.compte.delete({
+        where: {
+          id: existingSupplier.id,
+        },
+      });
+
+      await tx.fournisseur.delete({
+        where: {
+          id: existingSupplier.fournisseurSource.id,
+        },
+      });
     });
 
     return res.status(200).json({

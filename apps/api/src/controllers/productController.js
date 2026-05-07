@@ -1,10 +1,46 @@
+const path = require("path");
+const XLSX = require("xlsx");
 const prisma = require("../config/prisma");
 const { validateSchema } = require("../utils/validation");
+const {
+  buildGeneratedEAN13,
+  parseGeneratedEAN13Sequence,
+} = require("../utils/barcode");
 const { getOrganisationIdFromUser } = require("../utils/organisationScope");
+const {
+  ensureDefaultSupplierCompte,
+  resolveSupplierCompte,
+} = require("../services/compteService");
 const {
   productCreateSchema,
   productUpdateSchema,
 } = require("../utils/validationSchemas");
+const {
+  DEFAULT_VARIANT_SIZE,
+  decimalToNumber,
+  getVariantColor,
+  getVariantLabel,
+  getVariantSize,
+  normalizeVariantText,
+  sumVariantStock,
+  toApiVariant,
+} = require("../services/productVariantService");
+
+const PRODUCT_BARCODE_CONFLICT_MESSAGE =
+  "Ce code-barres est deja utilise par un autre produit";
+const VARIANT_BARCODE_CONFLICT_MESSAGE =
+  "Ce code-barres de variante est deja utilise";
+const IMPORT_DEFAULT_VARIANT_COLOR = "Standard";
+const PRODUCT_IMPORT_HEADERS = [
+  "nom",
+  "codebarres",
+  "categorie",
+  "prixachat",
+  "prixvente",
+  "stock",
+  "taille",
+  "couleur",
+];
 
 const parseId = (value) => {
   const parsedValue = Number(value);
@@ -12,6 +48,63 @@ const parseId = (value) => {
 };
 
 const normalizeRequiredString = (value) => String(value || "").trim();
+
+const normalizeImportHeader = (value) => normalizeRequiredString(value).toLowerCase();
+
+const normalizeImportNumberString = (value) =>
+  normalizeRequiredString(value).replace(/\s+/g, "").replace(",", ".");
+
+const parseImportNumber = (value) => {
+  const normalizedValue = normalizeImportNumberString(value);
+
+  if (!normalizedValue) {
+    return NaN;
+  }
+
+  const parsedValue = Number(normalizedValue);
+  return Number.isFinite(parsedValue) ? parsedValue : NaN;
+};
+
+const buildImportCategoryCode = (name, usedCodes) => {
+  const normalizedBase = normalizeRequiredString(name)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^A-Za-z0-9]+/g, "")
+    .toUpperCase();
+  const baseCode = normalizedBase.slice(0, 10) || "CAT";
+  let candidate = baseCode;
+  let suffix = 1;
+
+  while (usedCodes.has(candidate)) {
+    const suffixValue = String(suffix);
+    candidate = `${baseCode.slice(0, Math.max(1, 10 - suffixValue.length))}${suffixValue}`;
+    suffix += 1;
+  }
+
+  return candidate;
+};
+
+const getMaxGeneratedBarcodeSequence = (barcodes = []) =>
+  barcodes.reduce((maxSequence, barcode) => {
+    const sequence = parseGeneratedEAN13Sequence(barcode);
+    return sequence !== null && sequence > maxSequence ? sequence : maxSequence;
+  }, -1);
+
+const createEAN13Allocator = (usedBarcodes, initialSequence = 0) => {
+  let nextSequence = Math.max(0, Number(initialSequence) || 0);
+
+  return () => {
+    while (true) {
+      const candidate = buildGeneratedEAN13(nextSequence);
+      nextSequence += 1;
+
+      if (!usedBarcodes.has(candidate.toLowerCase())) {
+        usedBarcodes.add(candidate.toLowerCase());
+        return candidate;
+      }
+    }
+  };
+};
 
 const parseOptionalPositiveInteger = (value) => {
   if (value === undefined || value === null) {
@@ -39,9 +132,35 @@ const parseOptionalNonNegativeInteger = (value) => {
   return Number.isInteger(parsedValue) && parsedValue >= 0 ? parsedValue : NaN;
 };
 
+const parseOptionalNonNegativeQuantity = (value) => {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  if (typeof value === "string" && value.trim() === "") {
+    return null;
+  }
+
+  const parsedValue = Number(value);
+  return Number.isFinite(parsedValue) && parsedValue >= 0 ? parsedValue : NaN;
+};
+
 const parseRequiredNumber = (value) => {
   const parsedValue = Number(value);
   return Number.isFinite(parsedValue) ? parsedValue : NaN;
+};
+
+const parseOptionalNonNegativeNumber = (value) => {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  if (typeof value === "string" && value.trim() === "") {
+    return null;
+  }
+
+  const parsedValue = Number(value);
+  return Number.isFinite(parsedValue) && parsedValue >= 0 ? parsedValue : NaN;
 };
 
 const normalizeInitialStocks = (value) => {
@@ -58,7 +177,7 @@ const normalizeInitialStocks = (value) => {
     quantity:
       entry?.quantity === undefined
         ? 0
-        : parseOptionalNonNegativeInteger(entry?.quantity),
+        : parseOptionalNonNegativeQuantity(entry?.quantity),
   }));
 };
 
@@ -82,15 +201,599 @@ const parseOptionalBoolean = (value, defaultValue = true) => {
   return null;
 };
 
+const buildImportRowMap = (row) =>
+  new Map(
+    Object.entries(row || {}).map(([key, value]) => [normalizeImportHeader(key), value])
+  );
+
+const validateImportHeaders = (rows) => {
+  const headers = new Set(
+    rows.flatMap((row) => Object.keys(row || {}).map((key) => normalizeImportHeader(key)))
+  );
+  const missingHeaders = PRODUCT_IMPORT_HEADERS.filter((header) => !headers.has(header));
+
+  if (missingHeaders.length > 0) {
+    throw {
+      status: 400,
+      message: `Colonnes manquantes dans le fichier import: ${missingHeaders.join(", ")}.`,
+    };
+  }
+};
+
+const parseProductImportRows = (file) => {
+  const extension = path.extname(file?.originalname || "").toLowerCase();
+
+  if (![".xlsx", ".csv"].includes(extension)) {
+    throw {
+      status: 400,
+      message: "Seuls les fichiers .xlsx et .csv sont acceptes.",
+    };
+  }
+
+  let workbook;
+
+  try {
+    workbook = XLSX.read(file.buffer, { type: "buffer" });
+  } catch (error) {
+    throw {
+      status: 400,
+      message: "Impossible de lire le fichier d'import.",
+    };
+  }
+
+  const firstSheetName = workbook.SheetNames[0];
+
+  if (!firstSheetName) {
+    throw {
+      status: 400,
+      message: "Le fichier d'import ne contient aucune feuille exploitable.",
+    };
+  }
+
+  const rows = XLSX.utils.sheet_to_json(workbook.Sheets[firstSheetName], {
+    defval: "",
+    raw: false,
+  });
+
+  if (!rows.length) {
+    throw {
+      status: 400,
+      message: "Le fichier d'import ne contient aucune ligne.",
+    };
+  }
+
+  validateImportHeaders(rows);
+  return rows;
+};
+
+const normalizeImportProductRow = (rawRow) => {
+  const row = buildImportRowMap(rawRow);
+  const nom = normalizeRequiredString(row.get("nom"));
+  const codeBarres = normalizeRequiredString(row.get("codebarres"));
+  const categorie = normalizeRequiredString(row.get("categorie"));
+  const taille = normalizeVariantText(row.get("taille"), DEFAULT_VARIANT_SIZE);
+  const couleur =
+    normalizeVariantText(row.get("couleur"), IMPORT_DEFAULT_VARIANT_COLOR) ||
+    IMPORT_DEFAULT_VARIANT_COLOR;
+  const prixAchat = parseImportNumber(row.get("prixachat"));
+  const prixVente = parseImportNumber(row.get("prixvente"));
+  const stock = parseImportNumber(row.get("stock"));
+
+  if (!nom) {
+    throw {
+      status: 400,
+      message: "Le nom du produit est obligatoire.",
+    };
+  }
+
+  if (!categorie) {
+    throw {
+      status: 400,
+      message: "La categorie est obligatoire.",
+    };
+  }
+
+  if (!taille) {
+    throw {
+      status: 400,
+      message: "La taille est obligatoire.",
+    };
+  }
+
+  if (!couleur) {
+    throw {
+      status: 400,
+      message: "La couleur est obligatoire.",
+    };
+  }
+
+  if (Number.isNaN(prixAchat) || prixAchat < 0) {
+    throw {
+      status: 400,
+      message: "prixAchat doit etre un nombre valide.",
+    };
+  }
+
+  if (Number.isNaN(prixVente) || prixVente < 0) {
+    throw {
+      status: 400,
+      message: "prixVente doit etre un nombre valide.",
+    };
+  }
+
+  if (Number.isNaN(stock) || stock < 0) {
+    throw {
+      status: 400,
+      message: "stock doit etre un nombre valide.",
+    };
+  }
+
+  return {
+    nom,
+    nomKey: nom.toLowerCase(),
+    codeBarres: codeBarres || null,
+    categorie,
+    categorieKey: categorie.toLowerCase(),
+    taille,
+    couleur,
+    prixAchat,
+    prixVente,
+    stock,
+  };
+};
+
+const ensureImportCategory = async (
+  tx,
+  organisationId,
+  categoryName,
+  categoriesByName,
+  usedCategoryCodes
+) => {
+  const categoryKey = normalizeRequiredString(categoryName).toLowerCase();
+  const existingCategory = categoriesByName.get(categoryKey);
+
+  if (existingCategory) {
+    return {
+      category: existingCategory,
+      created: false,
+    };
+  }
+
+  const nextCode = buildImportCategoryCode(categoryName, usedCategoryCodes);
+
+  try {
+    const category = await tx.categorieProduit.create({
+      data: {
+        organisationId,
+        code: nextCode,
+        nom: categoryName,
+        nomComplet: categoryName,
+        actif: true,
+      },
+    });
+
+    return {
+      category,
+      created: true,
+    };
+  } catch (error) {
+    if (error?.code === "P2002") {
+      const category = await tx.categorieProduit.findFirst({
+        where: {
+          organisationId,
+          nom: categoryName,
+        },
+      });
+
+      if (category) {
+        return {
+          category,
+          created: false,
+        };
+      }
+    }
+
+    throw error;
+  }
+};
+
 const productInclude = {
+  categorieProduit: {
+    select: {
+      id: true,
+      code: true,
+      nom: true,
+      nomComplet: true,
+      actif: true,
+    },
+  },
   fournisseur: {
     select: {
       id: true,
       nom: true,
       email: true,
       telephone: true,
+      compte: {
+        select: {
+          id: true,
+          nom: true,
+          numeroCompte: true,
+        },
+      },
     },
   },
+  variantes: {
+    orderBy: [{ id: "asc" }],
+  },
+};
+
+const mapProductToResponse = (product) => {
+  const variants = (product.variantes || []).map((variant) =>
+    toApiVariant(variant, product)
+  );
+
+  return {
+    id: product.id,
+    name: product.nom,
+    barcode: product.codeBarres,
+    organisationId: product.organisationId,
+    categoryId: product.categorieProduit?.id || product.categorieId || null,
+    categoryCode: product.categorieProduit?.code || null,
+    category: product.categorieProduit?.nom || product.categorie,
+    categoryFullName: product.categorieProduit?.nomComplet || product.categorie,
+    purchasePrice: decimalToNumber(product.prixAchat),
+    salePrice: decimalToNumber(product.prixVente),
+    vatRate: decimalToNumber(product.tauxTVA),
+    retailPrice: decimalToNumber(product.prixDetail),
+    minimumThreshold: Number(product.seuilMinimum || 0),
+    supplierId: product.fournisseur?.compte?.id || product.fournisseurId || null,
+    supplierName:
+      product.fournisseur?.compte?.nom || product.fournisseur?.nom || null,
+    active: product.estActif,
+    stock: sumVariantStock(variants),
+    hasMultipleVariants: variants.filter((variant) => variant.active).length > 1,
+    variants,
+  };
+};
+
+const buildVariantSignature = (size, color) =>
+  `${String(size || DEFAULT_VARIANT_SIZE).toLowerCase()}::${String(color || "").toLowerCase()}`;
+
+const normalizeVariantsInput = ({
+  variants,
+  defaultBarcode,
+  defaultPurchasePrice,
+  defaultSalePrice,
+  defaultThreshold,
+  initialQuantity = 0,
+}) => {
+  const sourceVariants = Array.isArray(variants) && variants.length > 0
+    ? variants
+      : [
+        {
+          taille: DEFAULT_VARIANT_SIZE,
+          couleur: null,
+          codeBarres: null,
+          prixAchat: defaultPurchasePrice,
+          prixVente: defaultSalePrice,
+          quantiteStock: initialQuantity,
+          seuilMinimum: defaultThreshold,
+          actif: true,
+        },
+      ];
+
+  const seenBarcodes = new Set();
+  const seenSignatures = new Set();
+
+  return sourceVariants.map((variant, index) => {
+    const parsedVariantId = parseOptionalPositiveInteger(variant?.id);
+    const size = normalizeVariantText(variant?.taille, DEFAULT_VARIANT_SIZE);
+    const color = normalizeVariantText(variant?.couleur, null);
+    const barcode = normalizeVariantText(variant?.codeBarres, null);
+    const purchasePrice =
+      variant?.prixAchat === undefined
+        ? defaultPurchasePrice
+        : parseOptionalNonNegativeNumber(variant?.prixAchat);
+    const salePrice =
+      variant?.prixVente === undefined
+        ? defaultSalePrice
+        : parseOptionalNonNegativeNumber(variant?.prixVente);
+    const stockQuantity =
+      variant?.quantiteStock === undefined
+        ? 0
+        : parseOptionalNonNegativeQuantity(variant?.quantiteStock);
+    const minimumThreshold =
+      variant?.seuilMinimum === undefined
+        ? defaultThreshold
+        : parseOptionalNonNegativeInteger(variant?.seuilMinimum);
+    const active = parseOptionalBoolean(variant?.actif, true);
+
+    if (Number.isNaN(parsedVariantId)) {
+      throw {
+        status: 400,
+        message: "Chaque id de variante doit etre un entier valide.",
+      };
+    }
+
+    if (
+      Number.isNaN(purchasePrice) ||
+      Number.isNaN(salePrice) ||
+      Number.isNaN(stockQuantity) ||
+      Number.isNaN(minimumThreshold)
+    ) {
+      throw {
+        status: 400,
+        message:
+          "Chaque variante doit contenir des prix, un stock et un seuil minimum valides.",
+      };
+    }
+
+    if (active === null) {
+      throw {
+        status: 400,
+        message: "Le statut actif de chaque variante doit etre true ou false.",
+      };
+    }
+
+    if (parsedVariantId && !barcode) {
+      throw {
+        status: 400,
+        message: "Chaque variante existante doit contenir un code-barres.",
+      };
+    }
+
+    if (barcode) {
+      const normalizedBarcode = barcode.toLowerCase();
+
+      if (seenBarcodes.has(normalizedBarcode)) {
+        throw {
+          status: 409,
+          message: VARIANT_BARCODE_CONFLICT_MESSAGE,
+        };
+      }
+
+      seenBarcodes.add(normalizedBarcode);
+    }
+
+    const signature = buildVariantSignature(size, color);
+
+    if (seenSignatures.has(signature)) {
+      throw {
+        status: 400,
+        message: "Chaque combinaison taille / couleur doit etre unique.",
+      };
+    }
+
+    seenSignatures.add(signature);
+
+    return {
+      id: parsedVariantId,
+      order: index,
+      taille: size,
+      couleur: color,
+      codeBarres: barcode,
+      prixAchat: purchasePrice,
+      prixVente: salePrice,
+      quantiteStock: stockQuantity,
+      seuilMinimum: minimumThreshold,
+      actif: active,
+      signature,
+    };
+  });
+};
+
+const ensureUniqueProductBarcode = async (organisationId, barcode, excludeProductId = null) => {
+  const existingProduct = await prisma.produit.findFirst({
+    where: {
+      organisationId,
+      codeBarres: barcode,
+      ...(excludeProductId ? { id: { not: excludeProductId } } : {}),
+    },
+  });
+
+  if (existingProduct) {
+    throw {
+      status: 409,
+      message: PRODUCT_BARCODE_CONFLICT_MESSAGE,
+    };
+  }
+
+  const existingVariant = await prisma.produitVariante.findFirst({
+    where: {
+      organisationId,
+      codeBarres: barcode,
+      ...(excludeProductId ? { produitId: { not: excludeProductId } } : {}),
+    },
+    select: {
+      id: true,
+    },
+  });
+
+  if (existingVariant) {
+    throw {
+      status: 409,
+      message: PRODUCT_BARCODE_CONFLICT_MESSAGE,
+    };
+  }
+};
+
+const ensureUniqueVariantBarcodes = async (
+  organisationId,
+  variants,
+  excludeProductId = null
+) => {
+  const barcodes = variants
+    .map((variant) => variant.codeBarres)
+    .filter(Boolean);
+
+  if (!barcodes.length) {
+    return;
+  }
+
+  const conflictingVariants = await prisma.produitVariante.findMany({
+    where: {
+      organisationId,
+      codeBarres: {
+        in: barcodes,
+      },
+      ...(excludeProductId ? { produitId: { not: excludeProductId } } : {}),
+    },
+    select: {
+      id: true,
+      codeBarres: true,
+      produitId: true,
+    },
+  });
+
+  if (conflictingVariants.length > 0) {
+    throw {
+      status: 409,
+      message: VARIANT_BARCODE_CONFLICT_MESSAGE,
+    };
+  }
+
+  const conflictingProducts = await prisma.produit.findMany({
+    where: {
+      organisationId,
+      codeBarres: {
+        in: barcodes,
+      },
+      ...(excludeProductId ? { id: { not: excludeProductId } } : {}),
+    },
+    select: {
+      id: true,
+      codeBarres: true,
+    },
+  });
+
+  if (conflictingProducts.length > 0) {
+    throw {
+      status: 409,
+      message: VARIANT_BARCODE_CONFLICT_MESSAGE,
+    };
+  }
+};
+
+const loadUsedBarcodes = async (organisationId, excludeProductId = null) => {
+  const [products, variants] = await Promise.all([
+    prisma.produit.findMany({
+      where: {
+        organisationId,
+        ...(excludeProductId ? { id: { not: excludeProductId } } : {}),
+      },
+      select: {
+        codeBarres: true,
+      },
+    }),
+    prisma.produitVariante.findMany({
+      where: {
+        organisationId,
+        ...(excludeProductId ? { produitId: { not: excludeProductId } } : {}),
+        codeBarres: {
+          not: null,
+        },
+      },
+      select: {
+        codeBarres: true,
+      },
+    }),
+  ]);
+
+  return new Set(
+    [...products, ...variants]
+      .map((entry) => normalizeRequiredString(entry.codeBarres).toLowerCase())
+      .filter(Boolean)
+  );
+};
+
+const generateNextProductBarcode = async (organisationId) => {
+  const usedBarcodes = await loadUsedBarcodes(organisationId);
+  const allocateEAN13 = createEAN13Allocator(
+    usedBarcodes,
+    getMaxGeneratedBarcodeSequence(Array.from(usedBarcodes)) + 1
+  );
+
+  return allocateEAN13();
+};
+
+const generateMissingVariantBarcodes = async ({
+  organisationId,
+  productBarcode = null,
+  variants,
+  excludeProductId = null,
+}) => {
+  const usedBarcodes = await loadUsedBarcodes(organisationId, excludeProductId);
+  const reservedBarcodes = new Set();
+  const normalizedProductBarcode = normalizeRequiredString(productBarcode);
+
+  if (normalizedProductBarcode) {
+    reservedBarcodes.add(normalizedProductBarcode.toLowerCase());
+  }
+
+  for (const variant of variants) {
+    const normalizedVariantBarcode = normalizeRequiredString(variant.codeBarres);
+
+    if (normalizedVariantBarcode) {
+      reservedBarcodes.add(normalizedVariantBarcode.toLowerCase());
+    }
+  }
+
+  const allocateEAN13 = createEAN13Allocator(
+    usedBarcodes,
+    getMaxGeneratedBarcodeSequence(Array.from(usedBarcodes)) + 1
+  );
+
+  return variants.map((variant) => {
+    if (variant.codeBarres) {
+      return variant;
+    }
+
+    let candidate = "";
+
+    do {
+      candidate = allocateEAN13();
+    } while (reservedBarcodes.has(candidate.toLowerCase()));
+
+    reservedBarcodes.add(candidate.toLowerCase());
+
+    return {
+      ...variant,
+      codeBarres: candidate,
+    };
+  });
+};
+
+const syncAggregateProductStock = async (
+  tx,
+  organisationId,
+  productId,
+  pointsDeVente,
+  quantitiesByStoreId
+) => {
+  await tx.stock.createMany({
+    data: pointsDeVente.map((pointDeVente) => ({
+      organisationId,
+      produitId: productId,
+      pointDeVenteId: pointDeVente.id,
+      quantite: quantitiesByStoreId.get(pointDeVente.id) ?? 0,
+    })),
+    skipDuplicates: true,
+  });
+
+  await Promise.all(
+    pointsDeVente.map((pointDeVente) =>
+      tx.stock.updateMany({
+        where: {
+          organisationId,
+          produitId: productId,
+          pointDeVenteId: pointDeVente.id,
+        },
+        data: {
+          quantite: quantitiesByStoreId.get(pointDeVente.id) ?? 0,
+        },
+      })
+    )
+  );
 };
 
 const getAllProducts = async (req, res) => {
@@ -107,7 +810,7 @@ const getAllProducts = async (req, res) => {
     });
 
     return res.status(200).json({
-      products: produits,
+      products: produits.map(mapProductToResponse),
     });
   } catch (error) {
     console.error("Get products error:", error);
@@ -143,7 +846,7 @@ const getProductById = async (req, res) => {
     }
 
     return res.status(200).json({
-      product: produit,
+      product: mapProductToResponse(produit),
     });
   } catch (error) {
     console.error("Get product by id error:", error);
@@ -159,33 +862,59 @@ const createProduct = async (req, res) => {
     const {
       codeBarres,
       nom,
-      categorie,
+      categorieId,
       prixAchat,
       prixVente,
+      tauxTVA,
+      prixDetail,
       seuilMinimum,
       estActif,
       fournisseurId,
+      compteId,
+      fournisseurCompteId,
       initialStocks,
+      variants,
     } = validateSchema(productCreateSchema, req.body);
-    const normalizedCodeBarres = normalizeRequiredString(codeBarres);
+    const providedCodeBarres = normalizeRequiredString(codeBarres);
     const normalizedNom = normalizeRequiredString(nom);
-    const normalizedCategorie = normalizeRequiredString(categorie);
-
+    const parsedCategorieId = parseOptionalPositiveInteger(categorieId);
     const parsedPrixAchat = parseRequiredNumber(prixAchat);
-    const parsedPrixVente = parseRequiredNumber(prixVente);
+    const parsedPrixVente =
+      prixVente === undefined ? parseRequiredNumber(prixDetail) : parseRequiredNumber(prixVente);
+    const parsedTauxTVA =
+      tauxTVA === undefined ? 0 : parseOptionalNonNegativeNumber(tauxTVA);
+    const parsedPrixDetail =
+      prixDetail === undefined ? parsedPrixVente : parseOptionalNonNegativeNumber(prixDetail);
     const parsedSeuilMinimum =
       seuilMinimum === undefined ? 0 : parseOptionalNonNegativeInteger(seuilMinimum);
     const parsedEstActif = parseOptionalBoolean(estActif, true);
-    const parsedFournisseurId = parseOptionalPositiveInteger(fournisseurId);
+    const parsedFournisseurId = parseOptionalPositiveInteger(
+      compteId ?? fournisseurCompteId ?? fournisseurId
+    );
     const normalizedInitialStocks = normalizeInitialStocks(initialStocks);
 
+    if (!normalizedNom) {
+      return res.status(400).json({
+        message: "Le nom du produit est obligatoire.",
+      });
+    }
+
+    if (Number.isNaN(parsedCategorieId) || parsedCategorieId === null) {
+      return res.status(400).json({
+        message: "categorieId doit etre un entier valide.",
+      });
+    }
+
     if (
-      Number.isNaN(parsedSeuilMinimum) ||
-      parsedSeuilMinimum === null ||
-      parsedSeuilMinimum < 0
+      Number.isNaN(parsedPrixAchat) ||
+      Number.isNaN(parsedPrixVente) ||
+      Number.isNaN(parsedTauxTVA) ||
+      Number.isNaN(parsedPrixDetail) ||
+      Number.isNaN(parsedSeuilMinimum)
     ) {
       return res.status(400).json({
-        message: "seuilMinimum doit etre un entier positif ou egal a 0.",
+        message:
+          "Les prix, la TVA et le seuil minimum doivent contenir des valeurs valides.",
       });
     }
 
@@ -222,62 +951,81 @@ const createProduct = async (req, res) => {
       });
     }
 
-    const duplicateStoreIds = normalizedInitialStocks.reduce((duplicates, entry, index, array) => {
-      if (array.findIndex((item) => item.storeId === entry.storeId) !== index) {
-        duplicates.add(entry.storeId);
-      }
+    const totalInitialQuantity = normalizedInitialStocks.reduce(
+      (sum, entry) => sum + Number(entry.quantity || 0),
+      0
+    );
+    let normalizedCodeBarres = providedCodeBarres;
 
-      return duplicates;
-    }, new Set());
-
-    if (duplicateStoreIds.size > 0) {
-      return res.status(400).json({
-        message: `Les stocks initiaux contiennent des points de vente en doublon: ${Array.from(
-          duplicateStoreIds
-        ).join(", ")}.`,
-      });
+    if (normalizedCodeBarres) {
+      await ensureUniqueProductBarcode(organisationId, normalizedCodeBarres);
+    } else {
+      normalizedCodeBarres = await generateNextProductBarcode(organisationId);
     }
 
-    const existingProduct = await prisma.produit.findFirst({
-      where: {
-        organisationId,
-        codeBarres: normalizedCodeBarres,
-      },
+    const normalizedVariants = normalizeVariantsInput({
+      variants,
+      defaultBarcode: normalizedCodeBarres,
+      defaultPurchasePrice: parsedPrixAchat,
+      defaultSalePrice: parsedPrixDetail,
+      defaultThreshold: parsedSeuilMinimum,
+      initialQuantity: totalInitialQuantity,
+    });
+    const variantsWithBarcodes = await generateMissingVariantBarcodes({
+      organisationId,
+      productBarcode: normalizedCodeBarres,
+      variants: normalizedVariants,
     });
 
-    if (existingProduct) {
-      return res.status(409).json({
-        message: "Un produit avec ce code-barres existe deja.",
-      });
-    }
+    await ensureUniqueVariantBarcodes(organisationId, variantsWithBarcodes);
 
     if (parsedFournisseurId) {
-      const fournisseur = await prisma.fournisseur.findFirst({
-        where: {
-          organisationId,
-          id: parsedFournisseurId,
-        },
-      });
-
-      if (!fournisseur) {
-        return res.status(404).json({
-          message: "Fournisseur introuvable.",
+      try {
+        await resolveSupplierCompte(prisma, organisationId, parsedFournisseurId);
+      } catch (error) {
+        return res.status(error.status || 404).json({
+          message: error.message || "Fournisseur introuvable.",
         });
       }
     }
 
     const produit = await prisma.$transaction(async (tx) => {
-      const pointsDeVente = await tx.pointDeVente.findMany({
-        where: {
-          organisationId,
-        },
-        select: {
-          id: true,
-        },
-        orderBy: {
-          id: "asc",
-        },
-      });
+      const supplierCompte = parsedFournisseurId
+        ? await resolveSupplierCompte(tx, organisationId, parsedFournisseurId)
+        : await ensureDefaultSupplierCompte(tx, organisationId);
+      const legacySupplierId = supplierCompte.fournisseurSource.id;
+
+      const [pointsDeVente, category] = await Promise.all([
+        tx.pointDeVente.findMany({
+          where: {
+            organisationId,
+          },
+          select: {
+            id: true,
+          },
+          orderBy: {
+            id: "asc",
+          },
+        }),
+        tx.categorieProduit.findFirst({
+          where: {
+            organisationId,
+            id: parsedCategorieId,
+            actif: true,
+          },
+          select: {
+            id: true,
+            nom: true,
+          },
+        }),
+      ]);
+
+      if (!category) {
+        throw {
+          status: 404,
+          message: "Categorie produit introuvable.",
+        };
+      }
 
       const requestedStoreIds = normalizedInitialStocks.map((entry) => entry.storeId);
       const existingStoreIds = new Set(pointsDeVente.map((pointDeVente) => pointDeVente.id));
@@ -297,28 +1045,54 @@ const createProduct = async (req, res) => {
           organisationId,
           codeBarres: normalizedCodeBarres,
           nom: normalizedNom,
-          categorie: normalizedCategorie,
+          categorieId: category.id,
+          categorie: category.nom,
           prixAchat: parsedPrixAchat,
           prixVente: parsedPrixVente,
+          tauxTVA: parsedTauxTVA,
+          prixDetail: parsedPrixDetail,
+          prixGros: parsedPrixDetail,
+          prixMiniGros: parsedPrixDetail,
           seuilMinimum: parsedSeuilMinimum,
           estActif: parsedEstActif,
-          fournisseurId: parsedFournisseurId,
+          fournisseurId: legacySupplierId,
         },
       });
 
-      const quantityByStoreId = new Map(
-        normalizedInitialStocks.map((entry) => [entry.storeId, entry.quantity ?? 0])
-      );
-
-      await tx.stock.createMany({
-        data: pointsDeVente.map((pointDeVente) => ({
+      await tx.produitVariante.createMany({
+        data: variantsWithBarcodes.map((variant) => ({
           organisationId,
           produitId: produitCree.id,
-          pointDeVenteId: pointDeVente.id,
-          quantite: quantityByStoreId.get(pointDeVente.id) ?? 0,
+          taille: variant.taille,
+          couleur: variant.couleur,
+          codeBarres: variant.codeBarres,
+          prixAchat: variant.prixAchat,
+          prixVente: variant.prixVente,
+          quantiteStock: variant.quantiteStock,
+          seuilMinimum: variant.seuilMinimum,
+          actif: variant.actif,
         })),
-        skipDuplicates: true,
       });
+
+      const totalVariantStock = variantsWithBarcodes.reduce(
+        (sum, variant) => sum + Number(variant.quantiteStock || 0),
+        0
+      );
+      const quantityByStoreId = new Map(
+        pointsDeVente.map((pointDeVente) => [pointDeVente.id, 0])
+      );
+
+      if (pointsDeVente[0]) {
+        quantityByStoreId.set(pointsDeVente[0].id, totalVariantStock);
+      }
+
+      await syncAggregateProductStock(
+        tx,
+        organisationId,
+        produitCree.id,
+        pointsDeVente,
+        quantityByStoreId
+      );
 
       return tx.produit.findUnique({
         where: { id: produitCree.id },
@@ -328,12 +1102,25 @@ const createProduct = async (req, res) => {
 
     return res.status(201).json({
       message: "Produit cree avec succes.",
-      product: produit,
+      product: mapProductToResponse(produit),
     });
   } catch (error) {
     if (error?.status) {
       return res.status(error.status).json({
         message: error.message,
+      });
+    }
+
+    if (
+      error?.code === "P2002" &&
+      Array.isArray(error?.meta?.target) &&
+      error.meta.target.includes("codeBarres")
+    ) {
+      return res.status(409).json({
+        message:
+          error?.meta?.modelName === "ProduitVariante"
+            ? VARIANT_BARCODE_CONFLICT_MESSAGE
+            : PRODUCT_BARCODE_CONFLICT_MESSAGE,
       });
     }
 
@@ -360,6 +1147,7 @@ const updateProduct = async (req, res) => {
         organisationId,
         id: productId,
       },
+      include: productInclude,
     });
 
     if (!existingProduct) {
@@ -371,15 +1159,22 @@ const updateProduct = async (req, res) => {
     const {
       codeBarres,
       nom,
-      categorie,
+      categorieId,
       prixAchat,
       prixVente,
+      tauxTVA,
+      prixDetail,
       seuilMinimum,
       estActif,
       fournisseurId,
+      compteId,
+      fournisseurCompteId,
+      variants,
     } = validateSchema(productUpdateSchema, req.body);
 
     const data = {};
+    let nextSupplierCompteId = null;
+    let shouldUseDefaultSupplier = false;
 
     if (codeBarres !== undefined) {
       const normalizedCodeBarres = normalizeRequiredString(codeBarres);
@@ -405,20 +1200,45 @@ const updateProduct = async (req, res) => {
       data.nom = normalizedNom;
     }
 
-    if (categorie !== undefined) {
-      const normalizedCategorie = normalizeRequiredString(categorie);
+    if (categorieId !== undefined) {
+      const parsedCategorieId = parseOptionalPositiveInteger(categorieId);
 
-      if (!normalizedCategorie) {
+      if (Number.isNaN(parsedCategorieId) || parsedCategorieId === null) {
         return res.status(400).json({
-          message: "categorie ne peut pas etre vide.",
+          message: "categorieId doit etre un entier valide.",
         });
       }
 
-      data.categorie = normalizedCategorie;
+      const category = await prisma.categorieProduit.findFirst({
+        where: {
+          organisationId,
+          id: parsedCategorieId,
+          actif: true,
+        },
+        select: {
+          id: true,
+          nom: true,
+        },
+      });
+
+      if (!category) {
+        return res.status(404).json({
+          message: "Categorie produit introuvable.",
+        });
+      }
+
+      data.categorieId = category.id;
+      data.categorie = category.nom;
     }
 
     if (prixAchat !== undefined) {
       const parsedPrixAchat = parseRequiredNumber(prixAchat);
+
+      if (Number.isNaN(parsedPrixAchat)) {
+        return res.status(400).json({
+          message: "prixAchat doit etre un nombre valide.",
+        });
+      }
 
       data.prixAchat = parsedPrixAchat;
     }
@@ -426,17 +1246,43 @@ const updateProduct = async (req, res) => {
     if (prixVente !== undefined) {
       const parsedPrixVente = parseRequiredNumber(prixVente);
 
+      if (Number.isNaN(parsedPrixVente)) {
+        return res.status(400).json({
+          message: "prixVente doit etre un nombre valide.",
+        });
+      }
+
       data.prixVente = parsedPrixVente;
+    }
+
+    if (tauxTVA !== undefined) {
+      const parsedTauxTVA = parseOptionalNonNegativeNumber(tauxTVA);
+
+      if (Number.isNaN(parsedTauxTVA) || parsedTauxTVA === null) {
+        return res.status(400).json({
+          message: "tauxTVA doit etre un nombre superieur ou egal a 0.",
+        });
+      }
+
+      data.tauxTVA = parsedTauxTVA;
+    }
+
+    if (prixDetail !== undefined) {
+      const parsedPrixDetail = parseOptionalNonNegativeNumber(prixDetail);
+
+      if (Number.isNaN(parsedPrixDetail) || parsedPrixDetail === null) {
+        return res.status(400).json({
+          message: "prixDetail doit etre un nombre superieur ou egal a 0.",
+        });
+      }
+
+      data.prixDetail = parsedPrixDetail;
     }
 
     if (seuilMinimum !== undefined) {
       const parsedSeuilMinimum = parseOptionalNonNegativeInteger(seuilMinimum);
 
-      if (
-        Number.isNaN(parsedSeuilMinimum) ||
-        parsedSeuilMinimum === null ||
-        parsedSeuilMinimum < 0
-      ) {
+      if (Number.isNaN(parsedSeuilMinimum) || parsedSeuilMinimum === null) {
         return res.status(400).json({
           message: "seuilMinimum doit etre un entier positif ou egal a 0.",
         });
@@ -457,8 +1303,14 @@ const updateProduct = async (req, res) => {
       data.estActif = parsedEstActif;
     }
 
-    if (fournisseurId !== undefined) {
-      const parsedFournisseurId = parseOptionalPositiveInteger(fournisseurId);
+    if (
+      fournisseurId !== undefined ||
+      compteId !== undefined ||
+      fournisseurCompteId !== undefined
+    ) {
+      const parsedFournisseurId = parseOptionalPositiveInteger(
+        compteId ?? fournisseurCompteId ?? fournisseurId
+      );
 
       if (Number.isNaN(parsedFournisseurId)) {
         return res.status(400).json({
@@ -467,50 +1319,188 @@ const updateProduct = async (req, res) => {
       }
 
       if (parsedFournisseurId) {
-        const fournisseur = await prisma.fournisseur.findFirst({
-          where: {
-            organisationId,
-            id: parsedFournisseurId,
-          },
-        });
+        try {
+          await resolveSupplierCompte(prisma, organisationId, parsedFournisseurId);
+          nextSupplierCompteId = parsedFournisseurId;
+        } catch (error) {
+          return res.status(error.status || 404).json({
+            message: error.message || "Fournisseur introuvable.",
+          });
+        }
+      } else {
+        shouldUseDefaultSupplier = true;
+      }
+    }
 
-        if (!fournisseur) {
-          return res.status(404).json({
-            message: "Fournisseur introuvable.",
+    const nextBarcode = data.codeBarres || existingProduct.codeBarres;
+    await ensureUniqueProductBarcode(organisationId, nextBarcode, productId);
+
+    const nextVariantsInput =
+      variants === undefined
+        ? null
+        : normalizeVariantsInput({
+            variants,
+            defaultBarcode: nextBarcode,
+            defaultPurchasePrice:
+              data.prixAchat !== undefined
+                ? data.prixAchat
+                : decimalToNumber(existingProduct.prixAchat),
+            defaultSalePrice:
+              data.prixDetail !== undefined
+                ? data.prixDetail
+                : decimalToNumber(existingProduct.prixDetail),
+            defaultThreshold:
+              data.seuilMinimum !== undefined
+                ? data.seuilMinimum
+                : Number(existingProduct.seuilMinimum || 0),
+            initialQuantity: existingProduct.variantes.reduce(
+              (sum, variant) => sum + Number(variant.quantiteStock || 0),
+              0
+            ),
+          });
+    const nextVariants =
+      nextVariantsInput === null
+        ? null
+        : await generateMissingVariantBarcodes({
+            organisationId,
+            productBarcode: nextBarcode,
+            variants: nextVariantsInput,
+            excludeProductId: productId,
+          });
+
+    if (nextVariants) {
+      await ensureUniqueVariantBarcodes(organisationId, nextVariants, productId);
+    }
+
+    const produit = await prisma.$transaction(async (tx) => {
+      if (shouldUseDefaultSupplier) {
+        const supplierCompte = await ensureDefaultSupplierCompte(tx, organisationId);
+        data.fournisseurId = supplierCompte.fournisseurSource.id;
+      } else if (nextSupplierCompteId) {
+        const supplierCompte = await resolveSupplierCompte(
+          tx,
+          organisationId,
+          nextSupplierCompteId
+        );
+        data.fournisseurId = supplierCompte.fournisseurSource.id;
+      }
+
+      if (nextVariants) {
+        const existingVariantMap = new Map(
+          existingProduct.variantes.map((variant) => [variant.id, variant])
+        );
+        const payloadVariantIds = new Set(
+          nextVariants.map((variant) => variant.id).filter(Boolean)
+        );
+
+        for (const variant of nextVariants) {
+          if (variant.id && existingVariantMap.has(variant.id)) {
+            await tx.produitVariante.update({
+              where: { id: variant.id },
+              data: {
+                taille: variant.taille,
+                couleur: variant.couleur,
+                codeBarres: variant.codeBarres,
+                prixAchat: variant.prixAchat,
+                prixVente: variant.prixVente,
+                quantiteStock: variant.quantiteStock,
+                seuilMinimum: variant.seuilMinimum,
+                actif: variant.actif,
+              },
+            });
+          } else {
+            await tx.produitVariante.create({
+              data: {
+                organisationId,
+                produitId: productId,
+                taille: variant.taille,
+                couleur: variant.couleur,
+                codeBarres: variant.codeBarres,
+                prixAchat: variant.prixAchat,
+                prixVente: variant.prixVente,
+                quantiteStock: variant.quantiteStock,
+                seuilMinimum: variant.seuilMinimum,
+                actif: variant.actif,
+              },
+            });
+          }
+        }
+
+        const variantsToDeactivate = existingProduct.variantes.filter(
+          (variant) => !payloadVariantIds.has(variant.id)
+        );
+
+        if (variantsToDeactivate.length > 0) {
+          await tx.produitVariante.updateMany({
+            where: {
+              id: {
+                in: variantsToDeactivate.map((variant) => variant.id),
+              },
+            },
+            data: {
+              actif: false,
+            },
           });
         }
       }
 
-      data.fournisseurId = parsedFournisseurId;
-    }
-
-    if (data.codeBarres) {
-      const productWithSameBarcode = await prisma.produit.findFirst({
-        where: {
-          organisationId,
-          codeBarres: data.codeBarres,
-          id: {
-            not: productId,
-          },
-        },
-      });
-
-      if (productWithSameBarcode) {
-        return res.status(409).json({
-          message: "Un autre produit avec ce code-barres existe deja.",
+      if (Object.keys(data).length > 0) {
+        await tx.produit.update({
+          where: { id: productId },
+          data,
         });
       }
-    }
 
-    const produit = await prisma.produit.update({
-      where: { id: productId },
-      data,
-      include: productInclude,
+      const [pointsDeVente, variantsAfterUpdate] = await Promise.all([
+        tx.pointDeVente.findMany({
+          where: {
+            organisationId,
+          },
+          select: {
+            id: true,
+          },
+          orderBy: {
+            id: "asc",
+          },
+        }),
+        tx.produitVariante.findMany({
+          where: {
+            organisationId,
+            produitId: productId,
+          },
+          orderBy: [{ id: "asc" }],
+        }),
+      ]);
+
+      const totalVariantStock = variantsAfterUpdate.reduce(
+        (sum, variant) => sum + Number(variant.quantiteStock || 0),
+        0
+      );
+      const quantityByStoreId = new Map(
+        pointsDeVente.map((pointDeVente) => [pointDeVente.id, 0])
+      );
+
+      if (pointsDeVente[0]) {
+        quantityByStoreId.set(pointsDeVente[0].id, totalVariantStock);
+      }
+
+      await syncAggregateProductStock(
+        tx,
+        organisationId,
+        productId,
+        pointsDeVente,
+        quantityByStoreId
+      );
+
+      return tx.produit.findUnique({
+        where: { id: productId },
+        include: productInclude,
+      });
     });
 
     return res.status(200).json({
       message: "Produit mis a jour avec succes.",
-      product: produit,
+      product: mapProductToResponse(produit),
     });
   } catch (error) {
     if (error?.status) {
@@ -519,9 +1509,351 @@ const updateProduct = async (req, res) => {
       });
     }
 
+    if (
+      error?.code === "P2002" &&
+      Array.isArray(error?.meta?.target) &&
+      error.meta.target.includes("codeBarres")
+    ) {
+      return res.status(409).json({
+        message:
+          error?.meta?.modelName === "ProduitVariante"
+            ? VARIANT_BARCODE_CONFLICT_MESSAGE
+            : PRODUCT_BARCODE_CONFLICT_MESSAGE,
+      });
+    }
+
     console.error("Update product error:", error);
     return res.status(500).json({
       message: "Erreur serveur lors de la mise a jour du produit.",
+    });
+  }
+};
+
+const importProducts = async (req, res) => {
+  try {
+    const organisationId = getOrganisationIdFromUser(req.user);
+
+    if (!req.file?.buffer) {
+      return res.status(400).json({
+        success: false,
+        message: "Veuillez selectionner un fichier .xlsx ou .csv.",
+      });
+    }
+
+    const rawRows = parseProductImportRows(req.file);
+    const primaryStore = await prisma.pointDeVente.findFirst({
+      where: {
+        organisationId,
+      },
+      select: {
+        id: true,
+        nom: true,
+      },
+      orderBy: {
+        id: "asc",
+      },
+    });
+
+    if (!primaryStore) {
+      return res.status(400).json({
+        success: false,
+        message: "Aucun point de vente disponible pour l'import du stock.",
+      });
+    }
+
+    const existingProducts = await prisma.produit.findMany({
+      where: {
+        organisationId,
+      },
+      select: {
+        id: true,
+        nom: true,
+        codeBarres: true,
+      },
+      orderBy: [{ id: "asc" }],
+    });
+    const productsByName = new Map();
+
+    for (const product of existingProducts) {
+      const productKey = normalizeRequiredString(product.nom).toLowerCase();
+
+      if (productKey && !productsByName.has(productKey)) {
+        productsByName.set(productKey, product);
+      }
+    }
+
+    const categories = await prisma.categorieProduit.findMany({
+      where: {
+        organisationId,
+      },
+      orderBy: [{ id: "asc" }],
+    });
+    const categoriesByName = new Map();
+
+    for (const category of categories) {
+      const categoryKey = normalizeRequiredString(category.nom).toLowerCase();
+
+      if (categoryKey && !categoriesByName.has(categoryKey)) {
+        categoriesByName.set(categoryKey, category);
+      }
+    }
+
+    const usedCategoryCodes = new Set(
+      categories.map((category) => String(category.code || "").toUpperCase())
+    );
+    const usedBarcodes = await loadUsedBarcodes(organisationId);
+    const touchedProductIds = new Set();
+    const allocateGeneratedBarcode = createEAN13Allocator(
+      usedBarcodes,
+      getMaxGeneratedBarcodeSequence(Array.from(usedBarcodes)) + 1
+    );
+    let importedProducts = 0;
+    let importedVariants = 0;
+    const errors = [];
+
+    for (const [index, rawRow] of rawRows.entries()) {
+      const rowNumber = index + 2;
+
+      try {
+        const row = normalizeImportProductRow(rawRow);
+        let variantBarcode = row.codeBarres;
+
+        if (variantBarcode && usedBarcodes.has(variantBarcode.toLowerCase())) {
+          throw {
+            status: 409,
+            message: VARIANT_BARCODE_CONFLICT_MESSAGE,
+          };
+        }
+
+        if (!variantBarcode) {
+          variantBarcode = allocateGeneratedBarcode();
+        }
+
+        const existingProduct = productsByName.get(row.nomKey) || null;
+        const nextParentBarcode = existingProduct
+          ? existingProduct.codeBarres
+          : allocateGeneratedBarcode();
+
+        const result = await prisma.$transaction(async (tx) => {
+          let product = existingProduct;
+          let createdProduct = false;
+          let category = null;
+
+          if (!product) {
+            const categoryResult = await ensureImportCategory(
+              tx,
+              organisationId,
+              row.categorie,
+              categoriesByName,
+              usedCategoryCodes
+            );
+            category = categoryResult.category;
+
+            product = await tx.produit.create({
+              data: {
+                organisationId,
+                codeBarres: nextParentBarcode,
+                nom: row.nom,
+                categorieId: category.id,
+                categorie: category.nom,
+                prixAchat: row.prixAchat,
+                prixVente: row.prixVente,
+                tauxTVA: 0,
+                prixDetail: row.prixVente,
+                prixGros: row.prixVente,
+                prixMiniGros: row.prixVente,
+                seuilMinimum: 0,
+                estActif: true,
+              },
+              select: {
+                id: true,
+                nom: true,
+                codeBarres: true,
+              },
+            });
+            createdProduct = true;
+          }
+
+          const conflictingProduct = await tx.produit.findFirst({
+            where: {
+              organisationId,
+              codeBarres: variantBarcode,
+            },
+            select: {
+              id: true,
+            },
+          });
+
+          if (conflictingProduct) {
+            throw {
+              status: 409,
+              message: VARIANT_BARCODE_CONFLICT_MESSAGE,
+            };
+          }
+
+          const conflictingVariant = await tx.produitVariante.findFirst({
+            where: {
+              organisationId,
+              codeBarres: variantBarcode,
+            },
+            select: {
+              id: true,
+            },
+          });
+
+          if (conflictingVariant) {
+            throw {
+              status: 409,
+              message: VARIANT_BARCODE_CONFLICT_MESSAGE,
+            };
+          }
+
+          const createdVariant = await tx.produitVariante.create({
+            data: {
+              organisationId,
+              produitId: product.id,
+              taille: row.taille,
+              couleur: row.couleur,
+              codeBarres: variantBarcode,
+              prixAchat: row.prixAchat,
+              prixVente: row.prixVente,
+              quantiteStock: row.stock,
+              seuilMinimum: 0,
+              actif: true,
+            },
+          });
+
+          const stockRecord = await tx.stock.upsert({
+            where: {
+              organisationId_produitId_pointDeVenteId: {
+                organisationId,
+                produitId: product.id,
+                pointDeVenteId: primaryStore.id,
+              },
+            },
+            update: {
+              quantite: {
+                increment: row.stock,
+              },
+            },
+            create: {
+              organisationId,
+              produitId: product.id,
+              pointDeVenteId: primaryStore.id,
+              quantite: row.stock,
+            },
+          });
+
+          console.log("Variant stock linked", {
+            productId: product.id,
+            variantId: createdVariant.id,
+            pointDeVenteId: primaryStore.id,
+            quantity: row.stock,
+          });
+          console.log("Stock created", {
+            stockId: stockRecord.id,
+            productId: product.id,
+            pointDeVenteId: primaryStore.id,
+            quantity: stockRecord.quantite,
+          });
+
+          return {
+            product,
+            createdProduct,
+            category,
+            variantId: createdVariant.id,
+          };
+        });
+
+        if (result.createdProduct) {
+          importedProducts += 1;
+          productsByName.set(row.nomKey, result.product);
+          usedBarcodes.add(String(result.product.codeBarres || "").toLowerCase());
+
+          if (result.category) {
+            categoriesByName.set(row.categorieKey, result.category);
+            usedCategoryCodes.add(String(result.category.code || "").toUpperCase());
+          }
+        }
+
+        importedVariants += 1;
+        usedBarcodes.add(variantBarcode.toLowerCase());
+        touchedProductIds.add(result.product.id);
+      } catch (error) {
+        const importRowMap = buildImportRowMap(rawRow);
+
+        errors.push({
+          row: rowNumber,
+          product: normalizeRequiredString(importRowMap.get("nom")),
+          message: error?.message || "Erreur lors de l'import de cette ligne.",
+        });
+      }
+    }
+
+    if (touchedProductIds.size > 0) {
+      const pointsDeVente = await prisma.pointDeVente.findMany({
+        where: {
+          organisationId,
+        },
+        select: {
+          id: true,
+        },
+        orderBy: {
+          id: "asc",
+        },
+      });
+
+      for (const productId of touchedProductIds) {
+        const variants = await prisma.produitVariante.findMany({
+          where: {
+            organisationId,
+            produitId: productId,
+            actif: true,
+          },
+          select: {
+            quantiteStock: true,
+          },
+        });
+        const totalVariantStock = variants.reduce(
+          (sum, variant) => sum + Number(variant.quantiteStock || 0),
+          0
+        );
+        const quantityByStoreId = new Map(
+          pointsDeVente.map((pointDeVente) => [pointDeVente.id, 0])
+        );
+
+        if (pointsDeVente[0]) {
+          quantityByStoreId.set(pointsDeVente[0].id, totalVariantStock);
+        }
+
+        await syncAggregateProductStock(
+          prisma,
+          organisationId,
+          productId,
+          pointsDeVente,
+          quantityByStoreId
+        );
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      importedProducts,
+      importedVariants,
+      errors,
+    });
+  } catch (error) {
+    if (error?.status) {
+      return res.status(error.status).json({
+        success: false,
+        message: error.message,
+      });
+    }
+
+    console.error("Import products error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Erreur serveur lors de l'import des produits.",
     });
   }
 };
@@ -559,7 +1891,8 @@ const deleteProduct = async (req, res) => {
 
     if (existingProduct._count.lignesVente > 0) {
       return res.status(409).json({
-        message: "Impossible de supprimer ce produit car il a deja ete utilise dans des ventes.",
+        message:
+          "Impossible de supprimer ce produit car il a deja ete utilise dans des ventes.",
       });
     }
 
@@ -573,7 +1906,8 @@ const deleteProduct = async (req, res) => {
   } catch (error) {
     if (error.code === "P2003") {
       return res.status(409).json({
-        message: "Impossible de supprimer ce produit car il est lie a des enregistrements existants.",
+        message:
+          "Impossible de supprimer ce produit car il est lie a des enregistrements existants.",
       });
     }
 
@@ -588,6 +1922,7 @@ module.exports = {
   getAllProducts,
   getProductById,
   createProduct,
+  importProducts,
   updateProduct,
   deleteProduct,
 };
