@@ -20,7 +20,16 @@ const authMiddleware = require("./src/middlewares/authMiddleware");
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.use(cors());
+app.use(
+  cors({
+    origin: [
+      "http://localhost:3000",
+      "http://localhost:3001",
+      "https://sportzone-ten.vercel.app",
+    ],
+    credentials: true,
+  })
+);
 app.use(express.json());
 app.use(requestLoggerMiddleware);
 
@@ -49,10 +58,7 @@ app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
   startDailyReportJob();
 });
-// Route publique pour le keep-alive
-app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'OK', message: 'Server is alive' });
-});
+
 
 
 
