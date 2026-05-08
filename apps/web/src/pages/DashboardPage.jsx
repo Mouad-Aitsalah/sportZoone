@@ -10,6 +10,7 @@ import TopProductsChart from "../components/charts/TopProductsChart";
 import SectionCard from "../components/SectionCard";
 import StatCard from "../components/StatCard";
 import { cleanupLegacyStoreCache, getStoresCollection } from "../utils/storeAccess";
+import { CACHE_KEYS, CACHE_TTL_MS, readCache, writeCache } from "../utils/appCache";
 import { formatCurrencyDh } from "../utils/formatters";
 
 const periodOptions = [
@@ -32,9 +33,26 @@ function DashboardPage() {
     let isMounted = true;
 
     async function fetchDashboardData() {
+      const analyticsCache = readCache(CACHE_KEYS.analytics(period), CACHE_TTL_MS);
+      const alertsCache = readCache(CACHE_KEYS.stockAlerts(), CACHE_TTL_MS);
+      const storesCache = readCache(CACHE_KEYS.stores(), CACHE_TTL_MS);
+      const hasCachedData = Boolean(analyticsCache || alertsCache || storesCache);
+
+      if (analyticsCache && isMounted) {
+        setAnalytics(analyticsCache.data || null);
+      }
+
+      if (alertsCache && isMounted) {
+        setAlerts(Array.isArray(alertsCache.data) ? alertsCache.data : []);
+      }
+
+      if (storesCache && isMounted) {
+        setStores(Array.isArray(storesCache.data) ? storesCache.data : []);
+      }
+
       try {
         cleanupLegacyStoreCache();
-        setIsLoading(true);
+        setIsLoading(!hasCachedData);
         setErrorMessage("");
 
         const [analyticsResponse, alertsResponse, storesResponse] = await Promise.all([
@@ -46,12 +64,19 @@ function DashboardPage() {
         ]);
 
         if (isMounted) {
-          setAnalytics(analyticsResponse.data || null);
-          setAlerts(Array.isArray(alertsResponse.data) ? alertsResponse.data : []);
-          setStores(getStoresCollection(storesResponse.data));
+          const nextAnalytics = analyticsResponse.data || null;
+          const nextAlerts = Array.isArray(alertsResponse.data) ? alertsResponse.data : [];
+          const nextStores = getStoresCollection(storesResponse.data);
+
+          setAnalytics(nextAnalytics);
+          setAlerts(nextAlerts);
+          setStores(nextStores);
+          writeCache(CACHE_KEYS.analytics(period), nextAnalytics);
+          writeCache(CACHE_KEYS.stockAlerts(), nextAlerts);
+          writeCache(CACHE_KEYS.stores(), nextStores);
         }
       } catch (error) {
-        if (isMounted) {
+        if (isMounted && !hasCachedData) {
           setAnalytics(null);
           setStores([]);
           setAlerts([]);

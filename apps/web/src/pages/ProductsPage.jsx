@@ -7,6 +7,13 @@ import SectionCard from "../components/SectionCard";
 import SearchInput from "../components/SearchInput";
 import api from "../services/api";
 import { getCurrentUser } from "../store/authStore";
+import {
+  CACHE_KEYS,
+  CACHE_TTL_MS,
+  invalidateDomainCaches,
+  readCache,
+  writeCache,
+} from "../utils/appCache";
 import { cleanupLegacyStoreCache, getStoresCollection } from "../utils/storeAccess";
 import { downloadBlob } from "../utils/downloadBlob";
 import { formatCurrencyDh, formatDateTime } from "../utils/formatters";
@@ -277,6 +284,17 @@ const createInitialBarcodeExportState = () => ({
 
 const getProductWriteUrl = () =>
   api.defaults.baseURL?.replace(/\/api\/?$/, "/products") || "/products";
+
+const PRODUCTS_QUERY_PARAMS = {
+  params: {
+    page: 1,
+    limit: 500,
+  },
+};
+const PRODUCTS_CACHE_KEY = CACHE_KEYS.products("catalog");
+const SUPPLIERS_CACHE_KEY = CACHE_KEYS.suppliers();
+const PRODUCT_CATEGORIES_CACHE_KEY = CACHE_KEYS.productCategories();
+const STORES_CACHE_KEY = CACHE_KEYS.stores();
 
 const buildProductPayload = (formData) => ({
   ...(formData.codeBarres.trim() ? { codeBarres: formData.codeBarres.trim() } : {}),
@@ -567,14 +585,18 @@ function ProductsPage() {
   };
 
   const fetchProducts = async () => {
-    const response = await api.get("/products");
-    setProducts(getCollection(response.data, ["data", "products"]));
+    const response = await api.get("/products", PRODUCTS_QUERY_PARAMS);
+    const nextProducts = getCollection(response.data, ["data", "products"]);
+    setProducts(nextProducts);
+    writeCache(PRODUCTS_CACHE_KEY, nextProducts);
+    return nextProducts;
   };
 
   const fetchSuppliers = async () => {
     const response = await api.getSupplierAccounts();
     const suppliersList = getCollection(response.data, ["data", "comptes"]);
     setSuppliers(suppliersList);
+    writeCache(SUPPLIERS_CACHE_KEY, suppliersList);
     return suppliersList;
   };
 
@@ -584,7 +606,10 @@ function ProductsPage() {
         activeOnly: true,
       },
     });
-    setCategories(getCollection(response.data, ["categories", "data"]));
+    const nextCategories = getCollection(response.data, ["categories", "data"]);
+    setCategories(nextCategories);
+    writeCache(PRODUCT_CATEGORIES_CACHE_KEY, nextCategories);
+    return nextCategories;
   };
 
   const fetchStores = async () => {
@@ -593,6 +618,7 @@ function ProductsPage() {
       const storesList = getStoresCollection(response.data);
       setStores(storesList);
       setStoresError("");
+      writeCache(STORES_CACHE_KEY, storesList);
       return storesList;
     } catch (error) {
       const message =
@@ -608,15 +634,37 @@ function ProductsPage() {
     let isMounted = true;
 
     async function loadPageData() {
+      const productsCache = readCache(PRODUCTS_CACHE_KEY, CACHE_TTL_MS);
+      const suppliersCache = readCache(SUPPLIERS_CACHE_KEY, CACHE_TTL_MS);
+      const categoriesCache = readCache(PRODUCT_CATEGORIES_CACHE_KEY, CACHE_TTL_MS);
+      const storesCache = readCache(STORES_CACHE_KEY, CACHE_TTL_MS);
+
+      if (productsCache && isMounted) {
+        setProducts(Array.isArray(productsCache.data) ? productsCache.data : []);
+      }
+
+      if (canManageProducts && suppliersCache && isMounted) {
+        setSuppliers(Array.isArray(suppliersCache.data) ? suppliersCache.data : []);
+      }
+
+      if (canManageProducts && categoriesCache && isMounted) {
+        setCategories(Array.isArray(categoriesCache.data) ? categoriesCache.data : []);
+      }
+
+      if (canManageProducts && storesCache && isMounted) {
+        setStores(Array.isArray(storesCache.data) ? storesCache.data : []);
+        setStoresError("");
+      }
+
       cleanupLegacyStoreCache();
-      setIsLoading(true);
-      setIsLoadingSuppliers(true);
-      setIsLoadingCategories(true);
-      setIsLoadingStores(true);
+      setIsLoading(!productsCache);
+      setIsLoadingSuppliers(canManageProducts ? !suppliersCache : false);
+      setIsLoadingCategories(canManageProducts ? !categoriesCache : false);
+      setIsLoadingStores(canManageProducts ? !storesCache : false);
       setErrorMessage("");
       setStoresError("");
 
-      const requests = [api.get("/products")];
+      const requests = [api.get("/products", PRODUCTS_QUERY_PARAMS)];
 
       if (canManageProducts) {
         requests.push(api.getSupplierAccounts());
@@ -638,8 +686,10 @@ function ProductsPage() {
       }
 
       if (productsResult.status === "fulfilled") {
-        setProducts(getCollection(productsResult.value.data, ["data", "products"]));
-      } else {
+        const nextProducts = getCollection(productsResult.value.data, ["data", "products"]);
+        setProducts(nextProducts);
+        writeCache(PRODUCTS_CACHE_KEY, nextProducts);
+      } else if (!productsCache) {
         setErrorMessage(
           productsResult.reason?.response?.data?.message ||
             "Impossible de charger les produits pour le moment."
@@ -651,8 +701,10 @@ function ProductsPage() {
         setCategories([]);
         setStores([]);
       } else if (suppliersResult?.status === "fulfilled") {
-        setSuppliers(getCollection(suppliersResult.value.data, ["data", "comptes"]));
-      } else {
+        const nextSuppliers = getCollection(suppliersResult.value.data, ["data", "comptes"]);
+        setSuppliers(nextSuppliers);
+        writeCache(SUPPLIERS_CACHE_KEY, nextSuppliers);
+      } else if (!suppliersCache) {
         setNotice({
           type: "warning",
           message:
@@ -664,8 +716,10 @@ function ProductsPage() {
       if (!canManageProducts) {
         setCategories([]);
       } else if (categoriesResult?.status === "fulfilled") {
-        setCategories(getCollection(categoriesResult.value.data, ["categories", "data"]));
-      } else {
+        const nextCategories = getCollection(categoriesResult.value.data, ["categories", "data"]);
+        setCategories(nextCategories);
+        writeCache(PRODUCT_CATEGORIES_CACHE_KEY, nextCategories);
+      } else if (!categoriesCache) {
         setNotice({
           type: "warning",
           message:
@@ -681,7 +735,8 @@ function ProductsPage() {
         const storesList = getStoresCollection(storesResult.value.data);
         setStores(storesList);
         setStoresError("");
-      } else {
+        writeCache(STORES_CACHE_KEY, storesList);
+      } else if (!storesCache) {
         setStores([]);
         setStoresError(
           storesResult?.reason?.response?.data?.message ||
@@ -992,6 +1047,7 @@ function ProductsPage() {
         errors: Array.isArray(result.errors) ? result.errors : [],
       });
 
+      invalidateDomainCaches("products:", "stock:", "stock-alerts");
       await fetchProducts();
 
       if (canManageProducts) {
@@ -1398,6 +1454,7 @@ function ProductsPage() {
         await api.post(getProductWriteUrl(), payload);
       }
 
+      invalidateDomainCaches("products:", "stock:", "stock-alerts");
       await fetchProducts();
       if (canManageProducts) {
         await fetchSuppliers();
@@ -1432,6 +1489,7 @@ function ProductsPage() {
       setDeleteModalError("");
 
       await api.delete(`${getProductWriteUrl()}/${deleteModal.product.id}`);
+      invalidateDomainCaches("products:", "stock:", "stock-alerts");
       await fetchProducts();
       resetDeleteModal();
       setNotice({

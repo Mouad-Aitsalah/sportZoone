@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import Badge from "../components/Badge";
 import DataTable from "../components/DataTable";
@@ -9,6 +9,14 @@ import api from "../services/api";
 import { getOfflineSales, savePendingSale } from "../services/offlineDb";
 import { getCurrentUser } from "../store/authStore";
 import { useCart } from "../store/cartStore";
+import {
+  CACHE_KEYS,
+  CACHE_TTL_MS,
+  invalidateCache,
+  invalidateDomainCaches,
+  readCache,
+  writeCache,
+} from "../utils/appCache";
 import { cleanupLegacyStoreCache, normalizeStores } from "../utils/storeAccess";
 import { formatCurrencyDh } from "../utils/formatters";
 
@@ -22,7 +30,17 @@ const DEFAULT_CUSTOMER = {
   active: true,
 };
 
-const PRODUCTS_CACHE_KEY = "products";
+const PRODUCTS_CACHE_KEY = CACHE_KEYS.products("pos");
+const STORES_CACHE_KEY = CACHE_KEYS.stores();
+const CUSTOMERS_CACHE_KEY = CACHE_KEYS.customers();
+const POS_PRODUCTS_QUERY = {
+  params: {
+    page: 1,
+    limit: 500,
+    view: "pos",
+    includeSalesStats: false,
+  },
+};
 
 const getCollection = (payload, keys = []) => {
   if (Array.isArray(payload)) {
@@ -212,6 +230,90 @@ const roundPosQuantity = (value) => {
 
 const roundMoneyValue = (value) => Number(Number(value || 0).toFixed(2));
 
+const buildArchiveSaleItems = (cartItems = []) =>
+  cartItems.map((item) => ({
+    productId: item.productId,
+    variantId: item.variantId || null,
+    productName: item.name || item.productName || `Produit #${item.productId || "-"}`,
+    variantLabel: item.variantLabel || null,
+    quantity: Number(item.quantity || 0),
+    unitPrice: Number(item.price ?? item.unitPrice ?? 0),
+    subtotal: roundMoneyValue(
+      Number(item.subtotal ?? Number(item.quantity || 0) * Number(item.price ?? item.unitPrice ?? 0))
+    ),
+  }));
+
+const buildArchiveSaleRecord = ({
+  saleId,
+  ticketNumber,
+  createdAt,
+  total,
+  paymentMethod,
+  paidAmount = 0,
+  remainingAmount = 0,
+  paymentStatus = "PAID",
+  status = "completed",
+  localOnly = false,
+  cashRegisterName = null,
+  cashierName = null,
+  saleItems = [],
+}) => ({
+  id: saleId,
+  ticketNumber,
+  date: createdAt,
+  createdAt,
+  total: Number(total || 0),
+  paymentMethod: paymentMethod || "cash",
+  paidAmount: Number(paidAmount || 0),
+  remainingAmount: Number(remainingAmount || 0),
+  paymentStatus: paymentStatus || "PAID",
+  status,
+  localOnly,
+  cashRegisterName,
+  cashierName,
+  items: buildArchiveSaleItems(saleItems),
+});
+
+const mergeArchiveSale = (sales = [], nextSale) =>
+  [nextSale, ...sales.filter((sale) => sale.id !== nextSale.id && sale.ticketNumber !== nextSale.ticketNumber)];
+
+const buildEmptyCashSession = ({
+  id = null,
+  sessionNumber = null,
+  status = "OUVERTE",
+} = {}) => ({
+  id,
+  sessionNumber,
+  status,
+  totalSales: 0,
+  totalRefunds: 0,
+  totalNet: 0,
+  ticketsCount: 0,
+  ordersCount: 0,
+  sales: [],
+});
+
+const buildCashSessionWithSale = (currentSession, nextSale, sessionMeta = {}) => {
+  const baseSession = currentSession || buildEmptyCashSession(sessionMeta);
+  const nextSales = mergeArchiveSale(baseSession.sales || [], nextSale);
+
+  return {
+    ...baseSession,
+    ...sessionMeta,
+    totalSales: nextSales.reduce(
+      (totalValue, sale) => totalValue + Number(sale.total || 0),
+      0
+    ),
+    totalRefunds: nextSales.reduce((totalValue, sale) => {
+      const saleTotal = Number(sale.total || 0);
+      return saleTotal < 0 ? totalValue + Math.abs(saleTotal) : totalValue;
+    }, 0),
+    ticketsCount: nextSales.length,
+    ordersCount: nextSales.length,
+    sales: nextSales,
+  };
+};
+
 function PosPage() {
   const navigate = useNavigate();
   const [barcode, setBarcode] = useState("");
@@ -298,6 +400,18 @@ function PosPage() {
       ? selectedCustomerDetails.credit ?? selectedCustomer.credit ?? 0
       : selectedCustomer.credit ?? 0;
   const displayTotalAmount = refundMode ? -Math.abs(totalAmount) : totalAmount;
+  const currentCashSessionCacheKey = useMemo(
+    () =>
+      activeStoreId && activeCashRegisterId
+        ? CACHE_KEYS.currentCashSession(activeStoreId, activeCashRegisterId, currentUser?.id)
+        : null,
+    [activeCashRegisterId, activeStoreId, currentUser?.id]
+  );
+  const currentCashSessionRef = useRef(null);
+
+  useEffect(() => {
+    currentCashSessionRef.current = currentCashSession;
+  }, [currentCashSession]);
 
   useEffect(() => {
     setPriceInputs((current) => {
@@ -332,56 +446,73 @@ function PosPage() {
     ? filteredCustomers
     : [selectedCustomer];
 
-  const refreshCashSessionArchive = useCallback(async () => {
+  const setCachedCurrentCashSession = useCallback(
+    (nextValueOrUpdater) => {
+      setCurrentCashSession((currentValue) => {
+        const nextValue =
+          typeof nextValueOrUpdater === "function"
+            ? nextValueOrUpdater(currentValue)
+            : nextValueOrUpdater;
+
+        currentCashSessionRef.current = nextValue;
+
+        if (currentCashSessionCacheKey) {
+          if (nextValue) {
+            writeCache(currentCashSessionCacheKey, nextValue);
+          } else {
+            invalidateCache(currentCashSessionCacheKey);
+          }
+        }
+
+        return nextValue;
+      });
+    },
+    [currentCashSessionCacheKey]
+  );
+
+  const refreshOfflineArchiveSales = useCallback(async () => {
     if (!activeStoreId || !activeCashRegisterId) {
-      setCurrentCashSession(null);
       setOfflineArchiveSales([]);
       return;
     }
 
     try {
-      setIsLoadingCashSession(true);
+      const offlineSales = await getOfflineSales();
+      const todayKey = getLocalDateKey(new Date());
+      const filteredOfflineSales = offlineSales
+        .filter((sale) => ["pending", "failed", "syncing"].includes(sale.syncStatus))
+        .filter((sale) => getLocalDateKey(sale.createdAt) === todayKey)
+        .filter((sale) => Number(sale.storeId || 0) === Number(activeStoreId || 0))
+        .filter(
+          (sale) =>
+            Number(sale.caisseId || sale.cashRegisterId || 0) ===
+            Number(activeCashRegisterId || 0)
+        )
+        .filter((sale) => Number(sale.userId || 0) === Number(currentUser?.id || 0))
+        .map(mapOfflineSaleToArchiveSale);
 
-      const [sessionResult, offlineSalesResult] = await Promise.allSettled([
-        api.getCurrentCashSession({
-          params: {
-            storeId: activeStoreId,
-            cashRegisterId: activeCashRegisterId,
-            userId: currentUser?.id,
-          },
-        }),
-        getOfflineSales(),
-      ]);
-
-      setCurrentCashSession(
-        sessionResult.status === "fulfilled" ? sessionResult.value.data?.data || null : null
-      );
-
-      if (offlineSalesResult.status === "fulfilled") {
-        const todayKey = getLocalDateKey(new Date());
-        const filteredOfflineSales = offlineSalesResult.value
-          .filter((sale) => ["pending", "failed", "syncing"].includes(sale.syncStatus))
-          .filter((sale) => getLocalDateKey(sale.createdAt) === todayKey)
-          .filter((sale) => Number(sale.storeId || 0) === Number(activeStoreId || 0))
-          .filter(
-            (sale) =>
-              Number(sale.caisseId || sale.cashRegisterId || 0) ===
-              Number(activeCashRegisterId || 0)
-          )
-          .filter((sale) => Number(sale.userId || 0) === Number(currentUser?.id || 0))
-          .map(mapOfflineSaleToArchiveSale);
-
-        setOfflineArchiveSales(filteredOfflineSales);
-      } else {
-        setOfflineArchiveSales([]);
-      }
+      setOfflineArchiveSales(filteredOfflineSales);
     } catch (error) {
-      setCurrentCashSession(null);
       setOfflineArchiveSales([]);
-    } finally {
-      setIsLoadingCashSession(false);
     }
   }, [activeCashRegisterId, activeStoreId, currentUser?.id]);
+
+  const appendSaleToCurrentCashSession = useCallback(
+    (saleRecord, sessionMeta = {}) => {
+      setCachedCurrentCashSession((currentValue) =>
+        buildCashSessionWithSale(currentValue, saleRecord, {
+          id: sessionMeta.id || currentValue?.id || null,
+          sessionNumber: sessionMeta.sessionNumber || currentValue?.sessionNumber || null,
+          status: sessionMeta.status || currentValue?.status || "OUVERTE",
+        })
+      );
+    },
+    [setCachedCurrentCashSession]
+  );
+
+  const appendOfflineArchiveSale = useCallback((saleRecord) => {
+    setOfflineArchiveSales((currentValue) => mergeArchiveSale(currentValue, saleRecord));
+  }, []);
 
   const archiveSales = useMemo(
     () =>
@@ -431,30 +562,34 @@ function PosPage() {
     let isMounted = true;
 
     async function fetchProducts() {
+      const cachedProducts = readCache(PRODUCTS_CACHE_KEY, CACHE_TTL_MS);
+
+      if (cachedProducts && isMounted) {
+        setProducts(Array.isArray(cachedProducts.data) ? cachedProducts.data : []);
+      }
+
       try {
-        setIsLoadingProducts(true);
-        const response = await api.get("/products");
+        setIsLoadingProducts(!cachedProducts);
+        const response = await api.get("/products", POS_PRODUCTS_QUERY);
         const list = Array.isArray(response.data)
           ? response.data
           : response.data?.data || [];
 
         if (isMounted) {
           setProducts(list);
-          localStorage.setItem(PRODUCTS_CACHE_KEY, JSON.stringify(list));
+          writeCache(PRODUCTS_CACHE_KEY, list);
         }
       } catch (error) {
         if (isMounted) {
-          const cachedProducts = JSON.parse(
-            localStorage.getItem(PRODUCTS_CACHE_KEY) || "[]"
-          );
+          const cachedFallback = cachedProducts?.data || [];
 
-          if (cachedProducts.length) {
-            setProducts(cachedProducts);
+          if (cachedFallback.length) {
+            setProducts(cachedFallback);
           }
 
           setNotice({
             type: "warning",
-            message: cachedProducts.length
+            message: cachedFallback.length
               ? "Connexion indisponible. Produits charges depuis le cache local."
               : error.response?.data?.message ||
                 "Impossible de charger la liste rapide des produits.",
@@ -478,12 +613,29 @@ function PosPage() {
     let isMounted = true;
 
     async function fetchStores() {
+      const storesCache = readCache(STORES_CACHE_KEY, CACHE_TTL_MS);
+
+      if (storesCache && isMounted) {
+        const cachedStores = Array.isArray(storesCache.data) ? storesCache.data : [];
+        setStores(cachedStores);
+        setSelectedStoreId((currentValue) => {
+          if (!isAdmin) {
+            return currentValue;
+          }
+
+          return cachedStores.some((store) => store.id === currentValue)
+            ? currentValue
+            : cachedStores[0]?.id || null;
+        });
+      }
+
       try {
         const response = await api.get("/stores");
         const list = normalizeStores(response.data);
 
         if (isMounted) {
           setStores(list);
+          writeCache(STORES_CACHE_KEY, list);
           setSelectedStoreId((currentValue) => {
             if (!isAdmin) {
               return currentValue;
@@ -495,7 +647,7 @@ function PosPage() {
           });
         }
       } catch (error) {
-        if (isMounted) {
+        if (isMounted && !storesCache) {
           setStores([]);
           setCashRegisters([]);
           setSelectedStoreId(null);
@@ -531,6 +683,21 @@ function PosPage() {
     let isMounted = true;
 
     async function fetchCashRegisters() {
+      const cashRegistersCacheKey = CACHE_KEYS.cashRegisters(selectedStoreId);
+      const cashRegistersCache = readCache(cashRegistersCacheKey, CACHE_TTL_MS);
+
+      if (cashRegistersCache && isMounted) {
+        const cachedCashRegisters = Array.isArray(cashRegistersCache.data)
+          ? cashRegistersCache.data
+          : [];
+        setCashRegisters(cachedCashRegisters);
+        setSelectedCashRegisterId((currentValue) =>
+          cachedCashRegisters.some((cashRegister) => cashRegister.id === currentValue)
+            ? currentValue
+            : cachedCashRegisters[0]?.id || null
+        );
+      }
+
       try {
         const response = await api.get("/cash-registers", {
           params: { storeId: selectedStoreId },
@@ -541,6 +708,7 @@ function PosPage() {
 
         if (isMounted) {
           setCashRegisters(list);
+          writeCache(cashRegistersCacheKey, list);
           setSelectedCashRegisterId((currentValue) =>
             list.some((cashRegister) => cashRegister.id === currentValue)
               ? currentValue
@@ -548,7 +716,7 @@ function PosPage() {
           );
         }
       } catch (error) {
-        if (isMounted) {
+        if (isMounted && !cashRegistersCache) {
           setCashRegisters([]);
           setSelectedCashRegisterId(null);
           setNotice({
@@ -573,6 +741,7 @@ function PosPage() {
     const list = getCollection(response.data, ["data", "customers"]);
 
     setCustomers(list);
+    writeCache(CUSTOMERS_CACHE_KEY, list);
 
     const preferredCustomer =
       list.find((customer) => customer.id === customerIdToSelect) ||
@@ -591,8 +760,24 @@ function PosPage() {
     let isMounted = true;
 
     async function loadCustomers() {
+      const customersCache = readCache(CUSTOMERS_CACHE_KEY, CACHE_TTL_MS);
+
+      if (customersCache && isMounted) {
+        const cachedCustomers = Array.isArray(customersCache.data)
+          ? customersCache.data
+          : [];
+        const preferredCachedCustomer =
+          cachedCustomers.find((customer) => customer.customerNumber === 1) ||
+          cachedCustomers[0] ||
+          DEFAULT_CUSTOMER;
+
+        setCustomers(cachedCustomers.length ? cachedCustomers : [DEFAULT_CUSTOMER]);
+        setSelectedCustomerId(preferredCachedCustomer.id);
+        setSelectedCustomerDetails(preferredCachedCustomer);
+      }
+
       try {
-        setIsLoadingCustomers(true);
+        setIsLoadingCustomers(!customersCache);
         setCustomerNotice({ type: "", message: "" });
         const response = await api.getCustomers();
         const list = getCollection(response.data, ["data", "customers"]);
@@ -602,6 +787,7 @@ function PosPage() {
         }
 
         setCustomers(list);
+        writeCache(CUSTOMERS_CACHE_KEY, list);
 
         const preferredCustomer =
           list.find((customer) => customer.customerNumber === 1) ||
@@ -611,7 +797,7 @@ function PosPage() {
         setSelectedCustomerId(preferredCustomer.id);
         setSelectedCustomerDetails(preferredCustomer);
       } catch (error) {
-        if (isMounted) {
+        if (isMounted && !customersCache) {
           setCustomers([DEFAULT_CUSTOMER]);
           setSelectedCustomerId(DEFAULT_CUSTOMER.id);
           setSelectedCustomerDetails(DEFAULT_CUSTOMER);
@@ -681,30 +867,140 @@ function PosPage() {
   }, [customers, selectedCustomerId]);
 
   useEffect(() => {
-    refreshCashSessionArchive();
-  }, [refreshCashSessionArchive]);
+    let isMounted = true;
+
+    if (!activeStoreId || !activeCashRegisterId) {
+      setCachedCurrentCashSession(null);
+      setOfflineArchiveSales([]);
+      setIsLoadingCashSession(false);
+      return () => {
+        isMounted = false;
+      };
+    }
+
+    const cachedSession = currentCashSessionCacheKey
+      ? readCache(currentCashSessionCacheKey, CACHE_TTL_MS)
+      : null;
+
+    if (cachedSession && isMounted) {
+      setCachedCurrentCashSession(cachedSession.data || null);
+    }
+
+    setIsLoadingCashSession(!cachedSession);
+    void refreshOfflineArchiveSales();
+
+    async function loadCurrentCashSession() {
+      try {
+        const response = await api.getCurrentCashSession({
+          params: {
+            storeId: activeStoreId,
+            cashRegisterId: activeCashRegisterId,
+            userId: currentUser?.id,
+            view: "pos",
+          },
+        });
+
+        if (isMounted) {
+          setCachedCurrentCashSession(response.data?.data || null);
+        }
+      } catch (error) {
+        if (isMounted && !cachedSession) {
+          setCachedCurrentCashSession(null);
+        }
+      } finally {
+        if (isMounted) {
+          setIsLoadingCashSession(false);
+        }
+      }
+    }
+
+    loadCurrentCashSession();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [
+    activeCashRegisterId,
+    activeStoreId,
+    currentCashSessionCacheKey,
+    currentUser?.id,
+    refreshOfflineArchiveSales,
+    setCachedCurrentCashSession,
+  ]);
 
   const refreshProducts = async () => {
     try {
-      const response = await api.get("/products");
+      const response = await api.get("/products", POS_PRODUCTS_QUERY);
       const list = Array.isArray(response.data)
         ? response.data
         : response.data?.data || [];
 
       setProducts(list);
-      localStorage.setItem(PRODUCTS_CACHE_KEY, JSON.stringify(list));
+      writeCache(PRODUCTS_CACHE_KEY, list);
     } catch (error) {
       // Keep the cashier flow stable even if the background refresh fails.
     }
   };
 
   const getCachedProducts = () => {
-    try {
-      return JSON.parse(localStorage.getItem(PRODUCTS_CACHE_KEY) || "[]");
-    } catch (error) {
-      return [];
-    }
+    return readCache(PRODUCTS_CACHE_KEY, CACHE_TTL_MS)?.data || [];
   };
+
+  const applyProductStockDelta = useCallback((saleItems, direction) => {
+    const stockDeltaByEntry = new Map();
+
+    saleItems.forEach((item) => {
+      const itemKey = buildCartItemId(item.productId, item.variantId || null);
+      stockDeltaByEntry.set(
+        itemKey,
+        (stockDeltaByEntry.get(itemKey) || 0) + Number(item.quantity || 0) * direction
+      );
+    });
+
+    if (!stockDeltaByEntry.size) {
+      return;
+    }
+
+    setProducts((currentProducts) => {
+      const nextProducts = currentProducts.map((product) => {
+        let productDelta = stockDeltaByEntry.get(buildCartItemId(product.id, null)) || 0;
+        let hasChanges = productDelta !== 0;
+
+        const nextVariants = (product.variants || []).map((variant) => {
+          const variantDelta =
+            stockDeltaByEntry.get(buildCartItemId(product.id, variant.id)) || 0;
+
+          if (!variantDelta) {
+            return variant;
+          }
+
+          hasChanges = true;
+          productDelta += variantDelta;
+
+          return {
+            ...variant,
+            stock: Math.max(
+              0,
+              roundPosQuantity(Number(variant.stock ?? 0) + variantDelta)
+            ),
+          };
+        });
+
+        if (!hasChanges) {
+          return product;
+        }
+
+        return {
+          ...product,
+          variants: nextVariants,
+          stock: Math.max(0, roundPosQuantity(Number(product.stock ?? 0) + productDelta)),
+        };
+      });
+
+      writeCache(PRODUCTS_CACHE_KEY, nextProducts);
+      return nextProducts;
+    });
+  }, []);
 
   const generateLocalSaleId = () => {
     if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -1057,62 +1353,37 @@ function PosPage() {
       return;
     }
 
-    if (!isOnline) {
-      const cachedProducts = getCachedProducts();
+    const availableProducts = products.length ? products : getCachedProducts();
 
-      if (!cachedProducts.length) {
-        setNotice({
-          type: "warning",
-          message:
-            "Aucun produit disponible hors ligne. Rechargez l'application en ligne une fois.",
-        });
-        return;
-      }
-
-      const cachedProduct =
-        cachedProducts.find((item) => item.id === product.id) ||
-        cachedProducts.find(
-          (item) => String(item.barcode || "") === String(product.barcode || "")
-        );
-
-      if (!cachedProduct) {
-        setNotice({
-          type: "error",
-          message: "Produit non disponible hors ligne.",
-        });
-        return;
-      }
-
-      addOfflineProductToCart(cachedProduct);
+    if (!availableProducts.length) {
+      setNotice({
+        type: "warning",
+        message:
+          "Aucun produit disponible localement pour l'ajout rapide. Rechargez la page.",
+      });
       return;
     }
 
-    try {
-      setIsSearchingBarcode(true);
-
-      const response = await api.get(
-        `/products/barcode/${encodeURIComponent(product.barcode)}`,
-        {
-          params: {
-            storeId: activeStoreId,
-          },
-        }
+    const matchedProduct =
+      availableProducts.find((item) => item.id === product.id) ||
+      availableProducts.find(
+        (item) => String(item.barcode || "") === String(product.barcode || "")
       );
 
-      addProductEntryToCart({
-        ...response.data,
-        price: response.data.salePrice,
-      });
-    } catch (error) {
+    if (!matchedProduct) {
       setNotice({
         type: "error",
-        message:
-          error.response?.data?.message ||
-          "Impossible d'ajouter rapidement ce produit.",
+        message: "Produit non disponible localement.",
       });
-    } finally {
-      setIsSearchingBarcode(false);
+      return;
     }
+
+    if (!isOnline) {
+      addOfflineProductToCart(matchedProduct);
+      return;
+    }
+
+    addProductEntryToCart(matchedProduct);
   };
 
   const handleUpdateCartQuantity = (item, rawValue) => {
@@ -1213,18 +1484,19 @@ function PosPage() {
 
     try {
       setIsClosingCashSession(true);
-      await api.closeCurrentCashSession({
+      const response = await api.closeCurrentCashSession({
         params: {
           storeId: activeStoreId,
           cashRegisterId: activeCashRegisterId,
         },
       });
+      setCachedCurrentCashSession(response.data?.data?.currentSession || null);
       setSelectedArchivedSale(null);
       setNotice({
         type: "success",
         message: "Journee cloturee. Une nouvelle session vide est maintenant ouverte.",
       });
-      await refreshCashSessionArchive();
+      void refreshOfflineArchiveSales();
     } catch (error) {
       setNotice({
         type: "error",
@@ -1282,16 +1554,45 @@ function PosPage() {
     }
 
     const salePayload = buildSalePayload(paymentConfig);
+    const cartSnapshot = items.map((item) => ({ ...item }));
 
     try {
       setIsSubmittingSale(true);
       console.log("TRY ONLINE SALE");
       const response = await api.post("/sales", salePayload);
+      const saleResponse = response.data?.data || response.data?.sale || response.data || {};
       const ticketNumber =
-        response.data?.ticketNumber ||
-        response.data?.data?.ticketNumber ||
-        response.data?.sale?.ticketNumber;
+        saleResponse.ticketNumber || response.data?.ticketNumber || null;
+      const archiveSale = buildArchiveSaleRecord({
+        saleId: saleResponse.id || ticketNumber || `sale-${Date.now()}`,
+        ticketNumber: ticketNumber || `VENTE-${Date.now()}`,
+        createdAt: saleResponse.createdAt || new Date().toISOString(),
+        total: saleResponse.total ?? salePayload.total,
+        paymentMethod: saleResponse.paymentMethod || method,
+        paidAmount:
+          saleResponse.paidAmount ??
+          (method === "credit" ? 0 : salePayload.paidAmount ?? salePayload.total),
+        remainingAmount: saleResponse.remainingAmount ?? salePayload.remainingAmount ?? 0,
+        paymentStatus:
+          saleResponse.paymentStatus ||
+          (method === "partial"
+            ? "PARTIALLY_PAID"
+            : method === "credit"
+              ? "CREDIT"
+              : "PAID"),
+        status: saleResponse.status || "completed",
+        cashRegisterName: activeCashRegisterName,
+        cashierName: currentUser?.name || null,
+        saleItems: cartSnapshot,
+      });
 
+      appendSaleToCurrentCashSession(archiveSale, {
+        id: saleResponse.sessionId || currentCashSessionRef.current?.id || null,
+        sessionNumber:
+          saleResponse.sessionNumber || currentCashSessionRef.current?.sessionNumber || null,
+        status: saleResponse.sessionStatus || currentCashSessionRef.current?.status || "OUVERTE",
+      });
+      applyProductStockDelta(cartSnapshot, -1);
       clearCart();
       setIsPaymentOpen(false);
       setNotice({
@@ -1300,7 +1601,17 @@ function PosPage() {
           ? `Paiement confirme. Ticket ${ticketNumber} genere avec succes.`
           : "Paiement confirme avec succes.",
       });
-      await Promise.all([refreshProducts(), refreshCashSessionArchive()]);
+      invalidateDomainCaches(
+        "products:",
+        "sales:",
+        "sales-sessions:",
+        "stock:",
+        "stock-alerts",
+        "analytics:",
+        "stores"
+      );
+      window.dispatchEvent(new CustomEvent("sportzone:sales-updated"));
+      void refreshProducts();
       return true;
     } catch (error) {
       console.error("Sale API rejected, switching to offline fallback", {
@@ -1318,13 +1629,14 @@ function PosPage() {
       try {
         console.log("OFFLINE FALLBACK");
         await savePendingSale(offlineSale);
+        appendOfflineArchiveSale(mapOfflineSaleToArchiveSale(offlineSale));
         clearCart();
         setIsPaymentOpen(false);
         setNotice({
           type: "success",
           message: "Vente enregistree hors ligne.",
         });
-        await refreshCashSessionArchive();
+        window.dispatchEvent(new CustomEvent("sportzone:sales-updated"));
         return true;
       } catch (offlineError) {
         const backendMessage =
@@ -1385,6 +1697,7 @@ function PosPage() {
 
   const handleSubmitRefund = async () => {
     const userId = currentUser?.id;
+    const refundItemsSnapshot = items.map((item) => ({ ...item }));
 
     if (!refundMode) {
       return;
@@ -1432,13 +1745,36 @@ function PosPage() {
       setIsSubmittingRefund(true);
 
       const response = await api.createRefund(payload);
+      const refundResponse =
+        response.data?.refundSale || response.data?.sale || response.data?.data || response.data;
       const refundNumber =
-        response.data?.sale?.ticketNumber ||
-        response.data?.refundSale?.ticketNumber ||
+        refundResponse?.ticketNumber ||
         response.data?.refund?.numero ||
         response.data?.refunds?.[0]?.numero ||
         null;
+      const refundTotal = -Math.abs(totalAmount);
+      const archiveSale = buildArchiveSaleRecord({
+        saleId: refundResponse?.id || refundNumber || `refund-${Date.now()}`,
+        ticketNumber: refundNumber || `AVOIR-${Date.now()}`,
+        createdAt: refundResponse?.createdAt || new Date().toISOString(),
+        total: refundResponse?.total ?? refundTotal,
+        paymentMethod: refundResponse?.paymentMethod || refundPaymentMethod,
+        paidAmount: 0,
+        remainingAmount: 0,
+        paymentStatus: refundResponse?.paymentStatus || "PAID",
+        status: "refunded",
+        cashRegisterName: activeCashRegisterName,
+        cashierName: currentUser?.name || null,
+        saleItems: refundItemsSnapshot,
+      });
 
+      appendSaleToCurrentCashSession(archiveSale, {
+        id: refundResponse?.sessionId || currentCashSessionRef.current?.id || null,
+        sessionNumber:
+          refundResponse?.sessionNumber || currentCashSessionRef.current?.sessionNumber || null,
+        status: refundResponse?.sessionStatus || currentCashSessionRef.current?.status || "OUVERTE",
+      });
+      applyProductStockDelta(refundItemsSnapshot, 1);
       clearCart();
       setRefundMode(false);
       setRefundReason("");
@@ -1449,7 +1785,17 @@ function PosPage() {
           ? `Remboursement ${refundNumber} valide avec succes.`
           : "Remboursement valide avec succes.",
       });
-      await Promise.all([refreshProducts(), refreshCashSessionArchive()]);
+      invalidateDomainCaches(
+        "products:",
+        "sales:",
+        "sales-sessions:",
+        "stock:",
+        "stock-alerts",
+        "analytics:",
+        "stores"
+      );
+      window.dispatchEvent(new CustomEvent("sportzone:sales-updated"));
+      void refreshProducts();
     } catch (error) {
       setNotice({
         type: "error",
@@ -1495,6 +1841,7 @@ function PosPage() {
       });
       const createdCustomer = response.data?.data || response.data;
 
+      invalidateDomainCaches("customers");
       await fetchCustomers(createdCustomer?.id);
       setIsCustomerModalOpen(false);
       setCustomerModalError("");

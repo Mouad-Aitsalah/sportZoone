@@ -8,6 +8,7 @@ const {
 const {
   cashSessionInclude,
   cashSessionListInclude,
+  cashSessionPosInclude,
   createCashSession,
   getCashSessionDayRange,
   recalculateCashSessionMetrics,
@@ -66,11 +67,19 @@ const resolveSessionScope = (req) => {
   };
 };
 
+const logControllerDuration = (route, startedAt, metadata = {}) => {
+  console.info(`[perf] ${route}`, {
+    durationMs: Date.now() - startedAt,
+    ...metadata,
+  });
+};
+
 const findCurrentOpenSession = async ({
   tx = prisma,
   organisationId,
   storeId,
   cashRegisterId,
+  include = cashSessionInclude,
 }) =>
   tx.sessionCaisse.findFirst({
     where: {
@@ -79,31 +88,47 @@ const findCurrentOpenSession = async ({
       caisseId: cashRegisterId,
       statut: "OUVERTE",
     },
-    include: cashSessionInclude,
+    include,
     orderBy: {
       dateOuverture: "desc",
     },
   });
 
 const getCurrentCashSession = async (req, res) => {
+  const startedAt = Date.now();
   const organisationId = getOrganisationIdFromUser(req.user);
   const { storeId, cashRegisterId } = resolveSessionScope(req);
+  const isPosView = normalizeOptionalString(req.query.view)?.toLowerCase() === "pos";
 
-  if (!storeId || !cashRegisterId) {
+  try {
+    if (!storeId || !cashRegisterId) {
+      return res.status(200).json({
+        data: null,
+      });
+    }
+
+    const session = await findCurrentOpenSession({
+      organisationId,
+      storeId,
+      cashRegisterId,
+      include: isPosView ? cashSessionPosInclude : cashSessionInclude,
+    });
+
     return res.status(200).json({
-      data: null,
+      data: session
+        ? toApiCashSession(session, {
+            includeProfitMetrics: !isPosView,
+          })
+        : null,
+    });
+  } finally {
+    logControllerDuration("GET /api/cash-sessions/current", startedAt, {
+      organisationId,
+      storeId,
+      cashRegisterId,
+      view: isPosView ? "pos" : "default",
     });
   }
-
-  const session = await findCurrentOpenSession({
-    organisationId,
-    storeId,
-    cashRegisterId,
-  });
-
-  return res.status(200).json({
-    data: session ? toApiCashSession(session) : null,
-  });
 };
 
 const getCashSessions = async (req, res) => {

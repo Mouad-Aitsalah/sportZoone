@@ -139,6 +139,46 @@ const buildPaginatedResponse = ({ data, page, limit, total }) => ({
   },
 });
 
+const logControllerDuration = (route, startedAt, metadata = {}) => {
+  console.info(`[perf] ${route}`, {
+    durationMs: Date.now() - startedAt,
+    ...metadata,
+  });
+};
+
+const withTimedStep = async (label, callback) => {
+  console.time(label);
+
+  try {
+    return await callback();
+  } finally {
+    console.timeEnd(label);
+  }
+};
+
+const runTimedStep = (label, callback) => {
+  console.time(label);
+
+  try {
+    return callback();
+  } finally {
+    console.timeEnd(label);
+  }
+};
+
+const saleCustomerCompteSelect = {
+  id: true,
+  nom: true,
+  clientSource: {
+    select: {
+      id: true,
+      nom: true,
+      numeroClient: true,
+      credit: true,
+    },
+  },
+};
+
 const normalizePaymentMethod = (value) => {
   const normalizedValue = normalizeRequiredString(value).toLowerCase();
   return PAYMENT_METHOD_ALIASES[normalizedValue] || null;
@@ -1141,124 +1181,169 @@ const login = async (req, res) => {
 };
 
 const getProducts = async (req, res) => {
+  const startedAt = Date.now();
   const organisationId = getOrganisationIdFromUser(req.user);
+  const productView = normalizeOptionalString(req.query.view)?.toLowerCase() || "default";
+  const includeSalesStats =
+    productView !== "pos" && String(req.query.includeSalesStats || "").toLowerCase() !== "false";
   const { page, limit, skip } = getPaginationParams(req.query);
-  const [total, products] = await Promise.all([
-    prisma.produit.count({
-      where: {
-        organisationId,
-      },
-    }),
-    prisma.produit.findMany({
-      where: {
-        organisationId,
-      },
-      include: {
-        categorieProduit: {
-          select: {
-            id: true,
-            code: true,
-            nom: true,
-            nomComplet: true,
+  const productSelect = {
+    id: true,
+    nom: true,
+    codeBarres: true,
+    organisationId: true,
+    categorie: true,
+    categorieId: true,
+    fournisseurId: true,
+    prixAchat: true,
+    prixVente: true,
+    tauxTVA: true,
+    prixDetail: true,
+    prixGros: true,
+    prixMiniGros: true,
+    seuilMinimum: true,
+    estActif: true,
+    ...(productView === "pos"
+      ? {}
+      : {
+          categorieProduit: {
+            select: {
+              id: true,
+              code: true,
+              nom: true,
+              nomComplet: true,
+            },
           },
-        },
-        fournisseur: {
-          select: {
-            nom: true,
-            compte: {
-              select: {
-                id: true,
-                nom: true,
+          fournisseur: {
+            select: {
+              nom: true,
+              compte: {
+                select: {
+                  id: true,
+                  nom: true,
+                },
               },
             },
           },
-        },
-        variantes: {
-          orderBy: [{ id: "asc" }],
-        },
-      },
-      orderBy: {
-        id: "desc",
-      },
-      skip,
-      take: limit,
-    }),
-  ]);
-
-  const productIds = products.map((product) => product.id);
-  const salesStatsByProductId = new Map();
-
-  if (productIds.length > 0) {
-    const saleLines = await prisma.venteLigne.findMany({
-      where: {
-        organisationId,
-        produitId: {
-          in: productIds,
-        },
-        vente: {
-          organisationId,
-          status: {
-            notIn: ["cancelled", "refunded"],
-          },
-          total: {
-            gt: 0,
-          },
-        },
-      },
+        }),
+    variantes: {
+      orderBy: [{ id: "asc" }],
       select: {
-        produitId: true,
-        varianteId: true,
-        venteId: true,
-        quantite: true,
-        sousTotal: true,
+        id: true,
+        taille: true,
+        couleur: true,
+        codeBarres: true,
+        prixAchat: true,
+        prixVente: true,
+        quantiteStock: true,
+        seuilMinimum: true,
+        actif: true,
       },
-    });
+    },
+  };
+  try {
+    const [total, products] = await Promise.all([
+      prisma.produit.count({
+        where: {
+          organisationId,
+        },
+      }),
+      prisma.produit.findMany({
+        where: {
+          organisationId,
+        },
+        select: productSelect,
+        orderBy: {
+          id: "desc",
+        },
+        skip,
+        take: limit,
+      }),
+    ]);
 
-    for (const line of saleLines) {
-      const productId = line.produitId;
-      const variantId = line.varianteId || null;
-      const productStats =
-        salesStatsByProductId.get(productId) ||
-        {
-          ...buildEmptySalesStats(),
-          ticketIds: new Set(),
-          variantStats: new Map(),
-        };
+    const productIds = products.map((product) => product.id);
+    const salesStatsByProductId = new Map();
 
-      productStats.quantitySold += Number(line.quantite || 0);
-      productStats.revenue += decimalToNumber(line.sousTotal || 0);
-      productStats.ticketIds.add(line.venteId);
-      productStats.ticketsCount = productStats.ticketIds.size;
+    if (includeSalesStats && productIds.length > 0) {
+      const saleLines = await prisma.venteLigne.findMany({
+        where: {
+          organisationId,
+          produitId: {
+            in: productIds,
+          },
+          vente: {
+            organisationId,
+            status: {
+              notIn: ["cancelled", "refunded"],
+            },
+            total: {
+              gt: 0,
+            },
+          },
+        },
+        select: {
+          produitId: true,
+          varianteId: true,
+          venteId: true,
+          quantite: true,
+          sousTotal: true,
+        },
+      });
 
-      if (variantId) {
-        const variantStats =
-          productStats.variantStats.get(variantId) ||
+      for (const line of saleLines) {
+        const productId = line.produitId;
+        const variantId = line.varianteId || null;
+        const productStats =
+          salesStatsByProductId.get(productId) ||
           {
             ...buildEmptySalesStats(),
             ticketIds: new Set(),
+            variantStats: new Map(),
           };
 
-        variantStats.quantitySold += Number(line.quantite || 0);
-        variantStats.revenue += decimalToNumber(line.sousTotal || 0);
-        variantStats.ticketIds.add(line.venteId);
-        variantStats.ticketsCount = variantStats.ticketIds.size;
-        productStats.variantStats.set(variantId, variantStats);
+        productStats.quantitySold += Number(line.quantite || 0);
+        productStats.revenue += decimalToNumber(line.sousTotal || 0);
+        productStats.ticketIds.add(line.venteId);
+        productStats.ticketsCount = productStats.ticketIds.size;
+
+        if (variantId) {
+          const variantStats =
+            productStats.variantStats.get(variantId) ||
+            {
+              ...buildEmptySalesStats(),
+              ticketIds: new Set(),
+            };
+
+          variantStats.quantitySold += Number(line.quantite || 0);
+          variantStats.revenue += decimalToNumber(line.sousTotal || 0);
+          variantStats.ticketIds.add(line.venteId);
+          variantStats.ticketsCount = variantStats.ticketIds.size;
+          productStats.variantStats.set(variantId, variantStats);
+        }
+
+        salesStatsByProductId.set(productId, productStats);
       }
-
-      salesStatsByProductId.set(productId, productStats);
     }
-  }
 
-  return res.status(200).json(
-    buildPaginatedResponse({
-      data: products.map((product) =>
-        toApiProduct(product, salesStatsByProductId.get(product.id))
-      ),
+    return res.status(200).json(
+      buildPaginatedResponse({
+        data: products.map((product) =>
+          toApiProduct(product, salesStatsByProductId.get(product.id))
+        ),
+        page,
+        limit,
+        total,
+      })
+    );
+  } finally {
+    logControllerDuration("GET /api/products", startedAt, {
+      organisationId,
       page,
       limit,
-      total,
-    })
-  );
+      view: productView,
+      includeSalesStats,
+    });
+  }
 };
 
 const getProductSales = async (req, res) => {
@@ -1980,10 +2065,6 @@ const createSale = async (req, res) => {
     throw createHttpError(400, "total must be a valid number.", "BAD_REQUEST");
   }
 
-  let paidAmount = frontendTotal;
-  let remainingAmount = new Prisma.Decimal(0);
-  let paymentStatus = "PAID";
-
   if (isEmployee && (!employeeStoreId || !employeeCashRegisterId)) {
     throw createHttpError(
       403,
@@ -1991,434 +2072,463 @@ const createSale = async (req, res) => {
     );
   }
 
+  let sale = null;
+  const startedAt = Date.now();
+  const requestTimerLabel = `[createSale][org:${organisationId}][user:${userId}][${startedAt}] total`;
+
   try {
-    let sale = null;
+    console.time(requestTimerLabel);
     const saleTimestamp = new Date();
 
     for (let attempt = 0; attempt < 3; attempt += 1) {
+      const attemptTimerLabel = `${requestTimerLabel} attempt:${attempt + 1}`;
+
       try {
-        const numeroTicket = await buildAnnualDocumentNumber({
-          tx: prisma,
-          model: "vente",
-          field: "numeroTicket",
-          date: saleTimestamp,
-        });
+        console.time(attemptTimerLabel);
 
-        sale = await prisma.$transaction(async (tx) => {
-          const customerCompte =
-            requestedCustomerId !== null
-              ? await resolveCustomerCompte(tx, organisationId, requestedCustomerId)
-              : await getDefaultCustomerCompte(req.user, tx);
-          const customer = customerCompte.clientSource;
+        const numeroTicket = await withTimedStep(
+          `${attemptTimerLabel} ticket-number`,
+          async () =>
+            buildAnnualDocumentNumber({
+              tx: prisma,
+              model: "vente",
+              field: "numeroTicket",
+              date: saleTimestamp,
+            })
+        );
 
-          const pointDeVente = await tx.pointDeVente.findFirst({
-            where: {
-              organisationId,
-              id: storeId,
-            },
-            select: { id: true },
-          });
+        sale = await prisma.$transaction(
+          async (tx) => {
+            const productIds = [...new Set(items.map((item) => item.productId))];
 
-          if (!pointDeVente) {
-            throw createHttpError(404, "Store not found.");
-          }
-
-          const caisse = await tx.caisse.findFirst({
-            where: {
-              organisationId,
-              id: cashRegisterId,
-            },
-            select: {
-              id: true,
-              nom: true,
-              code: true,
-              pointDeVenteId: true,
-              estActive: true,
-            },
-          });
-
-          if (!caisse) {
-            throw createHttpError(404, "Cash register not found.");
-          }
-
-          if (caisse.pointDeVenteId !== storeId) {
-            throw createHttpError(
-              400,
-              "The selected cash register does not belong to the selected store."
+            const [customerCompte, caisse, produits] = await withTimedStep(
+              `${attemptTimerLabel} load-context`,
+              async () =>
+                Promise.all([
+                  requestedCustomerId !== null
+                    ? tx.compte.findFirst({
+                        where: {
+                          organisationId,
+                          id: requestedCustomerId,
+                          type: COMPTE_TYPES.CLIENT,
+                        },
+                        select: saleCustomerCompteSelect,
+                      })
+                    : getDefaultCustomerCompte(req.user, tx),
+                  tx.caisse.findFirst({
+                    where: {
+                      organisationId,
+                      id: cashRegisterId,
+                    },
+                    select: {
+                      id: true,
+                      code: true,
+                      pointDeVenteId: true,
+                      estActive: true,
+                    },
+                  }),
+                  tx.produit.findMany({
+                    where: {
+                      organisationId,
+                      id: {
+                        in: productIds,
+                      },
+                    },
+                    select: {
+                      id: true,
+                      nom: true,
+                      seuilMinimum: true,
+                      estActif: true,
+                      variantes: {
+                        orderBy: [{ id: "asc" }],
+                        select: {
+                          id: true,
+                          produitId: true,
+                          taille: true,
+                          couleur: true,
+                          codeBarres: true,
+                          prixVente: true,
+                          quantiteStock: true,
+                          seuilMinimum: true,
+                          actif: true,
+                        },
+                      },
+                    },
+                  }),
+                ])
             );
-          }
 
-          if (!caisse.estActive) {
-            throw createHttpError(400, "The selected cash register is inactive.");
-          }
-
-          const utilisateur = await tx.utilisateur.findFirst({
-            where: {
-              organisationId,
-              id: userId,
-            },
-            select: {
-              id: true,
-              role: true,
-              estActif: true,
-              pointDeVenteId: true,
-              caisseId: true,
-            },
-          });
-
-          if (!utilisateur) {
-            throw createHttpError(404, "User not found.");
-          }
-
-          if (!utilisateur.estActif) {
-            throw createHttpError(400, "Cannot create a sale with an inactive user.");
-          }
-
-          if (utilisateur.role === "EMPLOYE" && utilisateur.pointDeVenteId !== storeId) {
-            throw createHttpError(
-              400,
-              "This employee does not belong to the selected store."
-            );
-          }
-
-          if (utilisateur.role === "EMPLOYE" && utilisateur.caisseId !== cashRegisterId) {
-            throw createHttpError(
-              400,
-              "This employee does not belong to the selected cash register."
-            );
-          }
-
-          const productIds = [...new Set(items.map((item) => item.productId))];
-          const produits = await tx.produit.findMany({
-            where: {
-              organisationId,
-              id: {
-                in: productIds,
-              },
-            },
-            select: {
-              id: true,
-              nom: true,
-              prixVente: true,
-              prixAchat: true,
-              prixDetail: true,
-              seuilMinimum: true,
-              estActif: true,
-            },
-          });
-
-          if (produits.length !== productIds.length) {
-            const foundProductIds = new Set(produits.map((produit) => produit.id));
-            const missingProductIds = productIds.filter((id) => !foundProductIds.has(id));
-
-            throw createHttpError(
-              404,
-              `Products not found: ${missingProductIds.join(", ")}.`
-            );
-          }
-
-          const variants = await tx.produitVariante.findMany({
-            where: {
-              organisationId,
-              produitId: { in: productIds },
-            },
-            select: {
-              id: true,
-              produitId: true,
-              taille: true,
-              couleur: true,
-              codeBarres: true,
-              prixVente: true,
-              quantiteStock: true,
-              seuilMinimum: true,
-              actif: true,
-            },
-          });
-
-          const productMap = new Map(produits.map((produit) => [produit.id, produit]));
-          const variantsByProductId = variants.reduce((map, variant) => {
-            const currentVariants = map.get(variant.produitId) || [];
-            currentVariants.push(variant);
-            map.set(variant.produitId, currentVariants);
-            return map;
-          }, new Map());
-
-          const lignesData = [];
-          let total = new Prisma.Decimal(0);
-
-          for (const item of items) {
-            const produit = productMap.get(item.productId);
-
-            if (!produit.estActif) {
-              throw createHttpError(400, `Product ${produit.nom} is inactive.`);
+            if (!customerCompte?.clientSource) {
+              throw createHttpError(404, "Client introuvable.");
             }
 
-            const variant = ensureResolvedVariant({
-              item,
-              product: produit,
-              variantsByProductId,
-            });
+            if (!caisse) {
+              throw createHttpError(404, "Cash register not found.");
+            }
 
-            if (!variant.actif) {
+            if (caisse.pointDeVenteId !== storeId) {
               throw createHttpError(
                 400,
-                `Variant ${getVariantLabel(variant)} is inactive for product ${produit.nom}.`
+                "The selected cash register does not belong to the selected store."
               );
             }
 
-            if (Number(variant.quantiteStock || 0) < item.quantity) {
+            if (!caisse.estActive) {
+              throw createHttpError(400, "The selected cash register is inactive.");
+            }
+
+            if (produits.length !== productIds.length) {
+              const foundProductIds = new Set(produits.map((produit) => produit.id));
+              const missingProductIds = productIds.filter((id) => !foundProductIds.has(id));
+
               throw createHttpError(
-                400,
-                `Insufficient stock for ${produit.nom} / ${getVariantLabel(variant)}.`
+                404,
+                `Products not found: ${missingProductIds.join(", ")}.`
               );
             }
 
-            const prixUnitaire = new Prisma.Decimal(item.unitPrice);
-            const sousTotal = prixUnitaire.mul(item.quantity);
-
-            total = total.plus(sousTotal);
-
-            lignesData.push({
-              organisationId,
-              produitId: item.productId,
-              varianteId: variant.id,
-              quantite: item.quantity,
-              prixUnitaire,
-              sousTotal,
-              variant,
-              productName: produit.nom,
-            });
-          }
-
-          const totalDifference = total.minus(frontendTotal).abs();
-
-          if (totalDifference.greaterThan(SALE_TOTAL_TOLERANCE)) {
-            throw createHttpError(
-              400,
-              `Provided total (${frontendTotal.toFixed(2)}) does not match calculated total (${total.toFixed(2)}).`
+            const customer = customerCompte.clientSource;
+            const productMap = new Map(produits.map((produit) => [produit.id, produit]));
+            const variantsByProductId = new Map(
+              produits.map((produit) => [produit.id, produit.variantes || []])
             );
-          }
-
-          if (paymentMethod === "credit" && customer.numeroClient === 1) {
-            throw createHttpError(
-              400,
-              'Credit payment is not allowed for "Client inconnu".'
+            const nextStockByProductId = new Map(
+              produits.map((produit) => [
+                produit.id,
+                (produit.variantes || []).reduce(
+                  (sum, variant) => sum + Number(variant.quantiteStock || 0),
+                  0
+                ),
+              ])
             );
-          }
 
-          if (paymentMethod === "partial") {
-            if (
-              requestedPaidAmount === undefined ||
-              requestedPaidAmount === null ||
-              isBlankString(requestedPaidAmount)
-            ) {
+            const lignesData = [];
+            let computedTotal = new Prisma.Decimal(0);
+
+            for (const item of items) {
+              const produit = productMap.get(item.productId);
+
+              if (!produit.estActif) {
+                throw createHttpError(400, `Product ${produit.nom} is inactive.`);
+              }
+
+              const variant = ensureResolvedVariant({
+                item,
+                product: produit,
+                variantsByProductId,
+              });
+
+              if (!variant.actif) {
+                throw createHttpError(
+                  400,
+                  `Variant ${getVariantLabel(variant)} is inactive for product ${produit.nom}.`
+                );
+              }
+
+              if (Number(variant.quantiteStock || 0) < item.quantity) {
+                throw createHttpError(
+                  400,
+                  `Insufficient stock for ${produit.nom} / ${getVariantLabel(variant)}.`
+                );
+              }
+
+              const prixUnitaire = new Prisma.Decimal(item.unitPrice);
+              const sousTotal = prixUnitaire.mul(item.quantity);
+
+              computedTotal = computedTotal.plus(sousTotal);
+              nextStockByProductId.set(
+                item.productId,
+                Number(nextStockByProductId.get(item.productId) || 0) - Number(item.quantity || 0)
+              );
+
+              lignesData.push({
+                organisationId,
+                produitId: item.productId,
+                varianteId: variant.id,
+                quantite: item.quantity,
+                prixUnitaire,
+                sousTotal,
+                variant,
+              });
+            }
+
+            const totalDifference = computedTotal.minus(frontendTotal).abs();
+
+            if (totalDifference.greaterThan(SALE_TOTAL_TOLERANCE)) {
               throw createHttpError(
                 400,
-                "paidAmount is required for partial payment.",
-                "BAD_REQUEST"
+                `Provided total (${frontendTotal.toFixed(2)}) does not match calculated total (${computedTotal.toFixed(2)}).`
               );
             }
 
-            let parsedPaidAmount;
+            let computedPaidAmount = frontendTotal;
+            let computedRemainingAmount = new Prisma.Decimal(0);
+            let computedPaymentStatus = "PAID";
 
-            try {
-              parsedPaidAmount = new Prisma.Decimal(
-                validateNonNegativeNumber(requestedPaidAmount, "paidAmount")
-              );
-            } catch (error) {
+            if (paymentMethod === "credit" && customer.numeroClient === 1) {
               throw createHttpError(
                 400,
-                "paidAmount must be a valid number.",
-                "BAD_REQUEST"
+                'Credit payment is not allowed for "Client inconnu".'
               );
             }
 
-            if (parsedPaidAmount.lessThanOrEqualTo(0)) {
-              throw createHttpError(
-                400,
-                "paidAmount must be greater than 0 for partial payment.",
-                "BAD_REQUEST"
-              );
-            }
+            if (paymentMethod === "partial") {
+              if (
+                requestedPaidAmount === undefined ||
+                requestedPaidAmount === null ||
+                isBlankString(requestedPaidAmount)
+              ) {
+                throw createHttpError(
+                  400,
+                  "paidAmount is required for partial payment.",
+                  "BAD_REQUEST"
+                );
+              }
 
-            if (parsedPaidAmount.greaterThanOrEqualTo(total)) {
-              throw createHttpError(
-                400,
-                "paidAmount must be lower than total for partial payment.",
-                "BAD_REQUEST"
-              );
-            }
-
-            const expectedRemainingAmount = total.minus(parsedPaidAmount);
-
-            if (
-              requestedRemainingAmount !== undefined &&
-              requestedRemainingAmount !== null &&
-              !isBlankString(requestedRemainingAmount)
-            ) {
-              let parsedRemainingAmount;
+              let parsedPaidAmount;
 
               try {
-                parsedRemainingAmount = new Prisma.Decimal(
-                  validateNonNegativeNumber(requestedRemainingAmount, "remainingAmount")
+                parsedPaidAmount = new Prisma.Decimal(
+                  validateNonNegativeNumber(requestedPaidAmount, "paidAmount")
                 );
               } catch (error) {
                 throw createHttpError(
                   400,
-                  "remainingAmount must be a valid number.",
+                  "paidAmount must be a valid number.",
                   "BAD_REQUEST"
                 );
               }
 
-              if (
-                parsedRemainingAmount.minus(expectedRemainingAmount).abs().greaterThan(
-                  SALE_TOTAL_TOLERANCE
-                )
-              ) {
+              if (parsedPaidAmount.lessThanOrEqualTo(0)) {
                 throw createHttpError(
                   400,
-                  "remainingAmount does not match total minus paidAmount.",
+                  "paidAmount must be greater than 0 for partial payment.",
                   "BAD_REQUEST"
                 );
               }
+
+              if (parsedPaidAmount.greaterThanOrEqualTo(computedTotal)) {
+                throw createHttpError(
+                  400,
+                  "paidAmount must be lower than total for partial payment.",
+                  "BAD_REQUEST"
+                );
+              }
+
+              const expectedRemainingAmount = computedTotal.minus(parsedPaidAmount);
+
+              if (
+                requestedRemainingAmount !== undefined &&
+                requestedRemainingAmount !== null &&
+                !isBlankString(requestedRemainingAmount)
+              ) {
+                let parsedRemainingAmount;
+
+                try {
+                  parsedRemainingAmount = new Prisma.Decimal(
+                    validateNonNegativeNumber(requestedRemainingAmount, "remainingAmount")
+                  );
+                } catch (error) {
+                  throw createHttpError(
+                    400,
+                    "remainingAmount must be a valid number.",
+                    "BAD_REQUEST"
+                  );
+                }
+
+                if (
+                  parsedRemainingAmount.minus(expectedRemainingAmount).abs().greaterThan(
+                    SALE_TOTAL_TOLERANCE
+                  )
+                ) {
+                  throw createHttpError(
+                    400,
+                    "remainingAmount does not match total minus paidAmount.",
+                    "BAD_REQUEST"
+                  );
+                }
+              }
+
+              computedPaidAmount = parsedPaidAmount;
+              computedRemainingAmount = expectedRemainingAmount;
+              computedPaymentStatus = "PARTIALLY_PAID";
+            } else if (paymentMethod === "credit") {
+              computedPaidAmount = new Prisma.Decimal(0);
+              computedRemainingAmount = computedTotal;
+              computedPaymentStatus = "CREDIT";
             }
 
-            paidAmount = parsedPaidAmount;
-            remainingAmount = expectedRemainingAmount;
-            paymentStatus = "PARTIALLY_PAID";
-          } else if (paymentMethod === "credit") {
-            paidAmount = new Prisma.Decimal(0);
-            remainingAmount = total;
-            paymentStatus = "CREDIT";
-          }
+            const sessionCaisse = await withTimedStep(
+              `${attemptTimerLabel} resolve-session`,
+              async () =>
+                ensureOpenCashSession(tx, {
+                  organisationId,
+                  caisseId: cashRegisterId,
+                  pointDeVenteId: storeId,
+                  utilisateurId: userId,
+                  cashRegisterCode: caisse.code,
+                  date: saleTimestamp,
+                })
+            );
 
-          const sessionCaisse = await ensureOpenCashSession(tx, {
-            organisationId,
-            caisseId: cashRegisterId,
-            pointDeVenteId: storeId,
-            utilisateurId: userId,
-            cashRegisterCode: caisse.code,
-            date: saleTimestamp,
-          });
+            const createdSale = await withTimedStep(
+              `${attemptTimerLabel} create-sale`,
+              async () =>
+                tx.vente.create({
+                  data: {
+                    organisationId,
+                    numeroTicket,
+                    total: computedTotal,
+                    paymentMethod,
+                    paidAmount: computedPaidAmount,
+                    remainingAmount: computedRemainingAmount,
+                    paymentStatus: computedPaymentStatus,
+                    status: "completed",
+                    pointDeVenteId: storeId,
+                    caisseId: cashRegisterId,
+                    utilisateurId: userId,
+                    clientId: customer.id,
+                    sessionCaisseId: sessionCaisse.id,
+                  },
+                  select: {
+                    id: true,
+                    numeroTicket: true,
+                    total: true,
+                    paymentMethod: true,
+                    paidAmount: true,
+                    remainingAmount: true,
+                    paymentStatus: true,
+                    status: true,
+                    createdAt: true,
+                    pointDeVenteId: true,
+                    caisseId: true,
+                    utilisateurId: true,
+                    sessionCaisseId: true,
+                  },
+                })
+            );
 
-          const createdSale = await tx.vente.create({
-            data: {
-              organisationId,
-              numeroTicket,
-              total,
-              paymentMethod,
-              paidAmount,
-              remainingAmount,
-              paymentStatus,
-              status: "completed",
-              pointDeVenteId: storeId,
-              caisseId: cashRegisterId,
-              utilisateurId: userId,
-              clientId: customer.id,
-              sessionCaisseId: sessionCaisse.id,
-              lignes: {
-                create: lignesData.map(({ variant, productName, ...line }) => line),
-              },
-            },
-            select: {
-              id: true,
-              numeroTicket: true,
-              total: true,
-              paymentMethod: true,
-              paidAmount: true,
-              remainingAmount: true,
-              paymentStatus: true,
-              status: true,
-              createdAt: true,
-              pointDeVenteId: true,
-              caisseId: true,
-              utilisateurId: true,
-              clientId: true,
-              sessionCaisseId: true,
-              sessionCaisse: {
-                select: {
-                  id: true,
-                  numeroSession: true,
-                  statut: true,
-                  totalVentes: true,
-                  nombreTickets: true,
-                  dateOuverture: true,
-                  dateFermeture: true,
-                },
-              },
-              client: {
-                include: {
-                  compte: true,
-                },
-              },
-            },
-          });
+            await withTimedStep(`${attemptTimerLabel} create-lines`, async () =>
+              tx.venteLigne.createMany({
+                data: lignesData.map(({ variant, ...line }) => ({
+                  ...line,
+                  venteId: createdSale.id,
+                })),
+              })
+            );
 
-          for (const line of lignesData) {
-            if (Number(line.variant.quantiteStock || 0) < line.quantite) {
-              throw createHttpError(
-                400,
-                `Insufficient stock for product ${line.productName} / ${getVariantLabel(line.variant)}.`
-              );
-            }
+            await withTimedStep(`${attemptTimerLabel} update-stock`, async () => {
+              for (const line of lignesData) {
+                await tx.produitVariante.update({
+                  where: {
+                    id: line.varianteId,
+                  },
+                  data: {
+                    quantiteStock: {
+                      decrement: Math.abs(line.quantite),
+                    },
+                  },
+                });
+              }
 
-            await adjustVariantAndAggregateStock(tx, {
-              organisationId,
-              productId: line.produitId,
-              variantId: line.varianteId,
-              storeId,
-              quantityDelta: -line.quantite,
-              type: "SALE",
-              reason: `Sale ${createdSale.numeroTicket} - ${getVariantLabel(line.variant)}`,
+              for (const [productId, nextQuantity] of nextStockByProductId.entries()) {
+                await tx.stock.upsert({
+                  where: {
+                    organisationId_produitId_pointDeVenteId: {
+                      organisationId,
+                      produitId: productId,
+                      pointDeVenteId: storeId,
+                    },
+                  },
+                  update: {
+                    quantite: nextQuantity,
+                  },
+                  create: {
+                    organisationId,
+                    produitId: productId,
+                    pointDeVenteId: storeId,
+                    quantite: nextQuantity,
+                  },
+                });
+              }
+
+              await tx.stockMovement.createMany({
+                data: lignesData.map((line) => ({
+                  organisationId,
+                  produitId: line.produitId,
+                  pointDeVenteId: storeId,
+                  quantite: -Math.abs(line.quantite),
+                  type: "SALE",
+                  reason: normalizeOptionalString(
+                    `Sale ${createdSale.numeroTicket} - ${getVariantLabel(line.variant)}`
+                  ),
+                })),
+              });
             });
-          }
 
-          if (paymentMethod === "credit") {
-            await tx.client.update({
-              where: {
-                id: customer.id,
-              },
-              data: {
-                credit: {
-                  increment: total,
+            await withTimedStep(`${attemptTimerLabel} create-payment`, async () => {
+              if (paymentMethod !== "credit") {
+                return null;
+              }
+
+              return tx.client.update({
+                where: {
+                  id: customer.id,
                 },
-              },
+                data: {
+                  credit: {
+                    increment: computedTotal,
+                  },
+                },
+              });
             });
 
-            if (createdSale.client) {
-              createdSale.client.credit = new Prisma.Decimal(
-                createdSale.client.credit || 0
-              ).plus(total);
-            }
+            await withTimedStep(`${attemptTimerLabel} update-session`, async () =>
+              tx.sessionCaisse.update({
+                where: {
+                  id: sessionCaisse.id,
+                },
+                data: {
+                  totalVentes: {
+                    increment: computedTotal,
+                  },
+                  nombreTickets: {
+                    increment: 1,
+                  },
+                },
+              })
+            );
+
+            return runTimedStep(`${attemptTimerLabel} fetch-ticket-final`, () => ({
+              id: createdSale.id,
+              numeroTicket: createdSale.numeroTicket,
+              pointDeVenteId: createdSale.pointDeVenteId,
+              caisseId: createdSale.caisseId,
+              utilisateurId: createdSale.utilisateurId,
+              clientId: customerCompte.id,
+              customerNumber: customer.numeroClient,
+              customerName: customerCompte.nom || customer.nom || null,
+              customerCredit:
+                paymentMethod === "credit"
+                  ? decimalToNumber(new Prisma.Decimal(customer.credit || 0).plus(computedTotal))
+                  : decimalToNumber(customer.credit || 0),
+              total: createdSale.total,
+              paymentMethod: createdSale.paymentMethod,
+              paidAmount: createdSale.paidAmount,
+              remainingAmount: createdSale.remainingAmount,
+              paymentStatus: createdSale.paymentStatus,
+              status: createdSale.status,
+              createdAt: createdSale.createdAt,
+              sessionCaisseId: createdSale.sessionCaisseId,
+              sessionNumber: sessionCaisse.numeroSession,
+              sessionStatus: sessionCaisse.statut,
+            }));
+          },
+          {
+            maxWait: 10000,
+            timeout: 20000,
           }
-
-          await tx.sessionCaisse.update({
-            where: {
-              id: sessionCaisse.id,
-            },
-            data: {
-              totalVentes: {
-                increment: total,
-              },
-              nombreTickets: {
-                increment: 1,
-              },
-            },
-          });
-
-          if (createdSale.sessionCaisse) {
-            createdSale.sessionCaisse.totalVentes = new Prisma.Decimal(
-              createdSale.sessionCaisse.totalVentes || 0
-            ).plus(total);
-            createdSale.sessionCaisse.nombreTickets =
-              Number(createdSale.sessionCaisse.nombreTickets || 0) + 1;
-          }
-
-          return createdSale;
-        }, {
-          maxWait: 10000,
-          timeout: 20000,
-        });
+        );
         break;
       } catch (error) {
         if ((error.code === "P2002" || error.code === "P2028") && attempt < 2) {
@@ -2426,6 +2536,8 @@ const createSale = async (req, res) => {
         }
 
         throw error;
+      } finally {
+        console.timeEnd(attemptTimerLabel);
       }
     }
 
@@ -2435,10 +2547,10 @@ const createSale = async (req, res) => {
       storeId: sale.pointDeVenteId,
       cashRegisterId: sale.caisseId,
       userId: sale.utilisateurId,
-      customerId: sale.client?.compte?.id || sale.clientId,
-      customerNumber: sale.client ? sale.client.numeroClient : null,
-      customerName: sale.client?.compte?.nom || sale.client?.nom || null,
-      customerCredit: sale.client ? decimalToNumber(sale.client.credit) : 0,
+      customerId: sale.clientId,
+      customerNumber: sale.customerNumber,
+      customerName: sale.customerName,
+      customerCredit: sale.customerCredit,
       total: decimalToNumber(sale.total),
       paymentMethod: sale.paymentMethod,
       paidAmount: decimalToNumber(sale.paidAmount),
@@ -2447,8 +2559,8 @@ const createSale = async (req, res) => {
       status: sale.status,
       createdAt: sale.createdAt,
       sessionId: sale.sessionCaisseId,
-      sessionNumber: sale.sessionCaisse?.numeroSession || null,
-      sessionStatus: sale.sessionCaisse?.statut || null,
+      sessionNumber: sale.sessionNumber,
+      sessionStatus: sale.sessionStatus,
     });
   } catch (error) {
     console.error("Create sale error:", {
@@ -2458,6 +2570,16 @@ const createSale = async (req, res) => {
       details: error.details || null,
     });
     throw error;
+  } finally {
+    console.timeEnd(requestTimerLabel);
+    logControllerDuration("POST /api/sales", startedAt, {
+      organisationId,
+      storeId,
+      cashRegisterId,
+      userId,
+      itemsCount: items.length,
+      saleId: sale?.id || null,
+    });
   }
 };
 
@@ -2502,7 +2624,21 @@ const getSales = async (req, res) => {
     prisma.vente.count({ where }),
     prisma.vente.findMany({
       where,
-      include: {
+      select: {
+        id: true,
+        numeroTicket: true,
+        dateVente: true,
+        paymentMethod: true,
+        paidAmount: true,
+        remainingAmount: true,
+        paymentStatus: true,
+        status: true,
+        total: true,
+        pointDeVenteId: true,
+        caisseId: true,
+        utilisateurId: true,
+        clientId: true,
+        sessionCaisseId: true,
         pointDeVente: {
           select: {
             id: true,
@@ -2522,8 +2658,17 @@ const getSales = async (req, res) => {
           },
         },
         client: {
-          include: {
-            compte: true,
+          select: {
+            id: true,
+            numeroClient: true,
+            nom: true,
+            credit: true,
+            compte: {
+              select: {
+                id: true,
+                nom: true,
+              },
+            },
           },
         },
         sessionCaisse: {
@@ -2533,15 +2678,18 @@ const getSales = async (req, res) => {
             statut: true,
             dateOuverture: true,
             dateFermeture: true,
-            totalVentes: true,
-            nombreTickets: true,
           },
         },
         lignes: {
           orderBy: {
             id: "asc",
           },
-          include: {
+          select: {
+            produitId: true,
+            varianteId: true,
+            quantite: true,
+            prixUnitaire: true,
+            sousTotal: true,
             produit: {
               select: {
                 id: true,
@@ -2554,7 +2702,6 @@ const getSales = async (req, res) => {
                 id: true,
                 taille: true,
                 couleur: true,
-                codeBarres: true,
                 prixAchat: true,
               },
             },
@@ -3998,7 +4145,10 @@ const getAnalytics = async (req, res) => {
           lte: range.endDate,
         },
       },
-      include: {
+      select: {
+        id: true,
+        total: true,
+        createdAt: true,
         pointDeVente: {
           select: {
             id: true,
@@ -4006,7 +4156,10 @@ const getAnalytics = async (req, res) => {
           },
         },
         lignes: {
-          include: {
+          select: {
+            produitId: true,
+            quantite: true,
+            sousTotal: true,
             produit: {
               select: {
                 id: true,

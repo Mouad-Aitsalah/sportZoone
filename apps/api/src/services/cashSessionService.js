@@ -154,6 +154,43 @@ const cashSessionSaleInclude = {
   },
 };
 
+const cashSessionPosSaleInclude = {
+  caisse: {
+    select: {
+      id: true,
+      nom: true,
+      code: true,
+    },
+  },
+  utilisateur: {
+    select: {
+      id: true,
+      nom: true,
+    },
+  },
+  lignes: {
+    orderBy: {
+      id: "asc",
+    },
+    include: {
+      produit: {
+        select: {
+          id: true,
+          nom: true,
+        },
+      },
+      variante: {
+        select: {
+          id: true,
+          taille: true,
+          couleur: true,
+          codeBarres: true,
+        },
+      },
+    },
+  },
+};
+
 const cashSessionInclude = {
   caisse: {
     select: {
@@ -184,6 +221,39 @@ const cashSessionInclude = {
       dateVente: "desc",
     },
     include: cashSessionSaleInclude,
+  },
+};
+
+const cashSessionPosInclude = {
+  caisse: {
+    select: {
+      id: true,
+      nom: true,
+      code: true,
+      estActive: true,
+    },
+  },
+  pointDeVente: {
+    select: {
+      id: true,
+      nom: true,
+      adresse: true,
+      telephone: true,
+    },
+  },
+  utilisateur: {
+    select: {
+      id: true,
+      nom: true,
+      email: true,
+      role: true,
+    },
+  },
+  ventes: {
+    orderBy: {
+      dateVente: "desc",
+    },
+    include: cashSessionPosSaleInclude,
   },
 };
 
@@ -292,17 +362,24 @@ const formatCashSessionSale = (sale) => {
 };
 
 const toApiCashSession = (session, options = {}) => {
-  const { includeSales = true } = options;
+  const { includeSales = true, includeProfitMetrics = true } = options;
   const sessionSales = session.ventes || [];
-  const totalSales = sessionSales.reduce((sum, sale) => {
-    const saleTotal = decimalToNumber(sale.total);
-    return sum + saleTotal;
-  }, 0);
-  const totalRefunds = sessionSales.reduce((sum, sale) => {
-    const saleTotal = decimalToNumber(sale.total);
-    return saleTotal < 0 ? sum + Math.abs(saleTotal) : sum;
-  }, 0);
-  const totalNet = decimalToNumber(buildCashSessionProfit(sessionSales));
+  const totalSales =
+    session.totalVentes === undefined || session.totalVentes === null
+      ? sessionSales.reduce((sum, sale) => {
+          const saleTotal = decimalToNumber(sale.total);
+          return sum + saleTotal;
+        }, 0)
+      : decimalToNumber(session.totalVentes);
+  const totalRefunds = includeProfitMetrics
+    ? sessionSales.reduce((sum, sale) => {
+        const saleTotal = decimalToNumber(sale.total);
+        return saleTotal < 0 ? sum + Math.abs(saleTotal) : sum;
+      }, 0)
+    : 0;
+  const totalNet = includeProfitMetrics
+    ? decimalToNumber(buildCashSessionProfit(sessionSales))
+    : 0;
   const ticketsCount = session.nombreTickets ?? sessionSales.length;
 
   return {
@@ -425,7 +502,9 @@ const recalculateCashSessionMetrics = async (tx, { organisationId, sessionId }) 
 module.exports = {
   cashSessionInclude,
   cashSessionListInclude,
+  cashSessionPosInclude,
   cashSessionSaleInclude,
+  cashSessionPosSaleInclude,
   createCashSession,
   decimalToNumber,
   ensureOpenCashSession,

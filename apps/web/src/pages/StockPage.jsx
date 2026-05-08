@@ -7,6 +7,13 @@ import PageHeader from "../components/PageHeader";
 import SearchInput from "../components/SearchInput";
 import SectionCard from "../components/SectionCard";
 import { getCurrentUser, isAdminRole } from "../store/authStore";
+import {
+  CACHE_KEYS,
+  CACHE_TTL_MS,
+  invalidateDomainCaches,
+  readCache,
+  writeCache,
+} from "../utils/appCache";
 import { cleanupLegacyStoreCache } from "../utils/storeAccess";
 import { formatCurrencyDh } from "../utils/formatters";
 
@@ -30,6 +37,7 @@ const STOCK_QUERY_PARAMS = {
     limit: 500,
   },
 };
+const STOCK_CACHE_KEY = CACHE_KEYS.stock("inventory");
 
 function StockPage() {
   const [searchTerm, setSearchTerm] = useState("");
@@ -47,7 +55,10 @@ function StockPage() {
   const canViewFinancialStock = canManageStock;
   const fetchStocks = async () => {
     const response = await api.get("/stocks", STOCK_QUERY_PARAMS);
-    setStocks(Array.isArray(response.data) ? response.data : response.data?.data || []);
+    const nextStocks = Array.isArray(response.data) ? response.data : response.data?.data || [];
+    setStocks(nextStocks);
+    writeCache(STOCK_CACHE_KEY, nextStocks);
+    return nextStocks;
   };
 
   useEffect(() => {
@@ -60,22 +71,28 @@ function StockPage() {
     let isMounted = true;
 
     async function loadStocks() {
+      const stocksCache = readCache(STOCK_CACHE_KEY, CACHE_TTL_MS);
+
+      if (stocksCache && isMounted) {
+        setStocks(Array.isArray(stocksCache.data) ? stocksCache.data : []);
+      }
+
       try {
         cleanupLegacyStoreCache();
-        setIsLoading(true);
+        setIsLoading(!stocksCache);
         setErrorMessage("");
 
         const stocksResponse = await api.get("/stocks", STOCK_QUERY_PARAMS);
+        const nextStocks = Array.isArray(stocksResponse.data)
+          ? stocksResponse.data
+          : stocksResponse.data?.data || [];
 
         if (isMounted) {
-          setStocks(
-            Array.isArray(stocksResponse.data)
-              ? stocksResponse.data
-              : stocksResponse.data?.data || []
-          );
+          setStocks(nextStocks);
+          writeCache(STOCK_CACHE_KEY, nextStocks);
         }
       } catch (error) {
-        if (isMounted) {
+        if (isMounted && !stocksCache) {
           setErrorMessage(
             error.response?.data?.message ||
               "Impossible de charger le stock pour le moment."
@@ -235,6 +252,7 @@ function StockPage() {
       setModalError("");
 
       await api.post(endpoint, payload);
+      invalidateDomainCaches("stock:", "stock-alerts", "analytics:", "products:");
       await fetchStocks();
       resetStockModal();
       setNotice({

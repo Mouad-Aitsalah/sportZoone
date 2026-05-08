@@ -14,6 +14,13 @@ import {
   updateSaleStatus,
 } from "../services/offlineDb";
 import { getCurrentUser, isAdminRole, isCashierRole } from "../store/authStore";
+import {
+  CACHE_KEYS,
+  CACHE_TTL_MS,
+  invalidateDomainCaches,
+  readCache,
+  writeCache,
+} from "../utils/appCache";
 import { downloadBlob } from "../utils/downloadBlob";
 import {
   formatCurrencyDh,
@@ -398,6 +405,10 @@ function SalesHistoryPage() {
   const isAdmin = isAdminRole(currentUser?.role);
   const isCashier = isCashierRole(currentUser?.role);
   const visibleActiveTab = isCashier ? "commandes" : activeTab;
+  const salesCacheKey = CACHE_KEYS.sales(isCashier ? "cashier-history" : "admin-history");
+  const sessionsCacheKey = CACHE_KEYS.salesSessions(
+    isCashier ? "cashier-history" : "admin-history"
+  );
 
   const loadOfflineSalesState = useCallback(async () => {
     const localSales = await getOfflineSales();
@@ -423,15 +434,15 @@ function SalesHistoryPage() {
     }
 
     if (salesResult.status === "fulfilled") {
-      setBackendSales(getSalesCollection(salesResult.value.data));
-    } else {
-      setBackendSales([]);
+      const nextSales = getSalesCollection(salesResult.value.data);
+      setBackendSales(nextSales);
+      writeCache(salesCacheKey, nextSales);
     }
 
     if (sessionsResult.status === "fulfilled") {
-      setBackendSessions(getCollection(sessionsResult.value.data, ["data", "sessions"]));
-    } else {
-      setBackendSessions([]);
+      const nextSessions = getCollection(sessionsResult.value.data, ["data", "sessions"]);
+      setBackendSessions(nextSessions);
+      writeCache(sessionsCacheKey, nextSessions);
     }
 
     const hasOfflineSales =
@@ -440,19 +451,31 @@ function SalesHistoryPage() {
     if (salesResult.status === "rejected" && sessionsResult.status === "rejected" && !hasOfflineSales) {
       throw salesResult.reason;
     }
-  }, [isCashier]);
+  }, [isCashier, salesCacheKey, sessionsCacheKey]);
 
   useEffect(() => {
     let isMounted = true;
 
     async function loadPageData() {
+      const cachedSales = readCache(salesCacheKey, CACHE_TTL_MS);
+      const cachedSessions = readCache(sessionsCacheKey, CACHE_TTL_MS);
+      const hasCachedData = Boolean(cachedSales || cachedSessions);
+
+      if (cachedSales && isMounted) {
+        setBackendSales(Array.isArray(cachedSales.data) ? cachedSales.data : []);
+      }
+
+      if (cachedSessions && isMounted) {
+        setBackendSessions(Array.isArray(cachedSessions.data) ? cachedSessions.data : []);
+      }
+
       try {
-        setIsLoading(true);
+        setIsLoading(!hasCachedData);
         setErrorMessage("");
 
         await fetchPageData();
       } catch (error) {
-        if (isMounted) {
+        if (isMounted && !hasCachedData) {
           setErrorMessage(
             error.response?.data?.message ||
               "Impossible de charger l'historique des ventes."
@@ -470,7 +493,7 @@ function SalesHistoryPage() {
     return () => {
       isMounted = false;
     };
-  }, [fetchPageData]);
+  }, [fetchPageData, salesCacheKey, sessionsCacheKey]);
 
   useEffect(() => {
     const handleSalesUpdated = () => {
@@ -1062,6 +1085,15 @@ function SalesHistoryPage() {
         try {
           await api.post("/sales", payload);
           await markSaleAsSynced(sale.localId);
+          invalidateDomainCaches(
+            "sales:",
+            "sales-sessions:",
+            "products:",
+            "stock:",
+            "stock-alerts",
+            "analytics:",
+            "stores"
+          );
         } catch (error) {
           const syncErrorMessage =
             error.response?.data?.message ||
@@ -1075,6 +1107,7 @@ function SalesHistoryPage() {
       }
 
       await fetchPageData();
+      window.dispatchEvent(new CustomEvent("sportzone:sales-updated"));
       setNotice({
         type: "success",
         message: "Synchronisation des ventes offline terminee.",
@@ -1190,7 +1223,17 @@ function SalesHistoryPage() {
       setCancelModalError("");
 
       await api.post(`/sales/${saleToCancel.id}/cancel`);
+      invalidateDomainCaches(
+        "sales:",
+        "sales-sessions:",
+        "products:",
+        "stock:",
+        "stock-alerts",
+        "analytics:",
+        "stores"
+      );
       await fetchPageData();
+      window.dispatchEvent(new CustomEvent("sportzone:sales-updated"));
       setSaleToCancel(null);
       setNotice({
         type: "success",
@@ -1272,7 +1315,17 @@ function SalesHistoryPage() {
           })
         : await api.post(`/sales/${saleToReturn.id}/return`, payload);
 
+      invalidateDomainCaches(
+        "sales:",
+        "sales-sessions:",
+        "products:",
+        "stock:",
+        "stock-alerts",
+        "analytics:",
+        "stores"
+      );
       await fetchPageData();
+      window.dispatchEvent(new CustomEvent("sportzone:sales-updated"));
       closeReturnModal();
       setNotice({
         type: "success",
@@ -1333,7 +1386,9 @@ function SalesHistoryPage() {
         amount,
         paymentMethod: salePaymentMethod,
       });
+      invalidateDomainCaches("sales:", "analytics:", "customers");
       await fetchPageData();
+      window.dispatchEvent(new CustomEvent("sportzone:sales-updated"));
       closeSalePaymentModal();
       setNotice({
         type: "success",
