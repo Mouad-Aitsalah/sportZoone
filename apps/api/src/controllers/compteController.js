@@ -41,27 +41,90 @@ const buildCompteResponse = (compte) => {
   };
 };
 
-const getComptes = async (req, res) => {
-  const organisationId = getOrganisationIdFromUser(req.user);
-  const requestedType = normalizeCompteType(req.query.type);
+const buildCompteSummaryResponse = (compte) => {
+  const base = toApiCompte(compte);
 
-  if (req.query.type && !requestedType) {
-    throw createHttpError(400, "type must be CLIENT or FOURNISSEUR.");
+  if (compte.type === COMPTE_TYPES.CLIENT) {
+    return {
+      ...base,
+      customerNumber: compte.clientSource?.numeroClient || null,
+      credit: compte.clientSource ? Number(compte.clientSource.credit || 0) : 0,
+    };
   }
 
-  const comptes = await prisma.compte.findMany({
-    where: {
-      organisationId,
-      ...(requestedType ? { type: requestedType } : {}),
-    },
-    include: compteInclude,
-    orderBy: [{ type: "asc" }, { nom: "asc" }],
-  });
+  return {
+    ...base,
+  };
+};
 
-  return res.status(200).json({
-    success: true,
-    data: comptes.map(buildCompteResponse),
-  });
+const getComptes = async (req, res) => {
+  const startedAt = Date.now();
+  const timerLabel = `[perf] GET /api/comptes ${startedAt}-${Math.random()
+    .toString(16)
+    .slice(2, 8)}`;
+  console.time(timerLabel);
+  const organisationId = getOrganisationIdFromUser(req.user);
+  const requestedType = normalizeCompteType(req.query.type);
+  const requestedView = normalizeOptionalString(req.query.view)?.toLowerCase() || "default";
+  const isSummaryView = requestedView === "summary";
+
+  try {
+    if (req.query.type && !requestedType) {
+      throw createHttpError(400, "type must be CLIENT or FOURNISSEUR.");
+    }
+
+    if (req.query.view && !["default", "summary"].includes(requestedView)) {
+      throw createHttpError(400, "view must be default or summary.");
+    }
+
+    const comptes = await prisma.compte.findMany({
+      where: {
+        organisationId,
+        ...(requestedType ? { type: requestedType } : {}),
+      },
+      ...(isSummaryView
+        ? {
+            select: {
+              id: true,
+              organisationId: true,
+              numeroCompte: true,
+              type: true,
+              nom: true,
+              telephone: true,
+              email: true,
+              adresse: true,
+              actif: true,
+              ...(requestedType !== COMPTE_TYPES.FOURNISSEUR
+                ? {
+                    clientSource: {
+                      select: {
+                        numeroClient: true,
+                        credit: true,
+                      },
+                    },
+                  }
+                : {}),
+            },
+          }
+        : {
+            include: compteInclude,
+          }),
+      orderBy: [{ type: "asc" }, { nom: "asc" }],
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: comptes.map(isSummaryView ? buildCompteSummaryResponse : buildCompteResponse),
+    });
+  } finally {
+    console.timeEnd(timerLabel);
+    console.info("[perf] GET /api/comptes", {
+      durationMs: Date.now() - startedAt,
+      organisationId,
+      type: requestedType || "all",
+      view: requestedView,
+    });
+  }
 };
 
 const getCompteByIdHandler = async (req, res) => {

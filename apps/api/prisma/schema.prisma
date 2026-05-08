@@ -118,6 +118,7 @@ model CategorieProduit {
   @@unique([organisationId, nom])
   @@index([organisationId])
   @@index([actif])
+  @@index([organisationId, actif])
 }
 
 model PointDeVente {
@@ -260,6 +261,8 @@ model Produit {
   @@index([categorie])
   @@index([categorieId])
   @@index([fournisseurId])
+  @@index([organisationId, nom])
+  @@index([organisationId, categorieId])
 }
 
 model ProduitVariante {
@@ -268,6 +271,7 @@ model ProduitVariante {
   produitId      Int
   taille         String?
   couleur        String?
+  valeursVariante String?
   codeBarres     String?
   prixAchat      Decimal?        @db.Decimal(10, 2)
   prixVente      Decimal?        @db.Decimal(10, 2)

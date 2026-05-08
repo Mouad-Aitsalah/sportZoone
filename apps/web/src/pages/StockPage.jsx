@@ -119,6 +119,7 @@ function StockPage() {
         return (
           !query ||
           item.productName?.toLowerCase().includes(query) ||
+          item.category?.toLowerCase().includes(query) ||
           item.barcode?.toLowerCase().includes(query) ||
           item.variantLabel?.toLowerCase().includes(query) ||
           item.variantSize?.toLowerCase().includes(query) ||
@@ -315,7 +316,7 @@ function StockPage() {
           <SearchInput
             value={searchTerm}
             onChange={setSearchTerm}
-            placeholder="Rechercher par produit ou code-barres"
+            placeholder="Rechercher par produit, categorie, code-barres ou variante"
           />
           {canViewFinancialStock ? (
             <select
@@ -339,6 +340,7 @@ function StockPage() {
             canViewFinancialStock
               ? [
                   { key: "product", label: "Produit" },
+                  { key: "variant", label: "Variante" },
                   { key: "size", label: "Taille" },
                   { key: "color", label: "Couleur" },
                   { key: "barcode", label: "Code-barres" },
@@ -350,6 +352,7 @@ function StockPage() {
                 ]
               : [
                   { key: "product", label: "Produit" },
+                  { key: "variant", label: "Variante" },
                   { key: "size", label: "Taille" },
                   { key: "color", label: "Couleur" },
                   { key: "barcode", label: "Code-barres" },
@@ -384,6 +387,7 @@ function StockPage() {
                 <td>
                   <strong>{item.productName}</strong>
                 </td>
+                <td>{item.variantLabel || "-"}</td>
                 <td>{item.variantSize || "Unique"}</td>
                 <td>{item.variantColor || "-"}</td>
                 <td>{item.barcode}</td>
@@ -475,6 +479,10 @@ function StockPage() {
             <div className="detail-stat">
               <span>Code-barres</span>
               <strong>{stockModal.stock.barcode}</strong>
+            </div>
+            <div className="detail-stat">
+              <span>Variante</span>
+              <strong>{stockModal.stock.variantLabel || "-"}</strong>
             </div>
             <div className="detail-stat">
               <span>Taille</span>

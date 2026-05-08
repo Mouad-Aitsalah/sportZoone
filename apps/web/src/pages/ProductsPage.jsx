@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import DataTable from "../components/DataTable";
 import Badge from "../components/Badge";
 import Modal from "../components/Modal";
@@ -6,15 +6,15 @@ import PageHeader from "../components/PageHeader";
 import SectionCard from "../components/SectionCard";
 import SearchInput from "../components/SearchInput";
 import api from "../services/api";
-import { getCurrentUser } from "../store/authStore";
 import {
-  CACHE_KEYS,
-  CACHE_TTL_MS,
-  invalidateDomainCaches,
-  readCache,
-  writeCache,
-} from "../utils/appCache";
-import { cleanupLegacyStoreCache, getStoresCollection } from "../utils/storeAccess";
+  cacheResources,
+  hydrateCachedResource,
+  readCachedResourceData,
+  refreshCachedResource,
+} from "../services/cacheService";
+import { getCurrentUser } from "../store/authStore";
+import { invalidateDomainCaches } from "../utils/appCache";
+import { cleanupLegacyStoreCache } from "../utils/storeAccess";
 import { downloadBlob } from "../utils/downloadBlob";
 import { formatCurrencyDh, formatDateTime } from "../utils/formatters";
 
@@ -101,6 +101,20 @@ const getVariantSizeValue = (variant) => variant?.size || variant?.taille || "";
 
 const getVariantColorValue = (variant) => variant?.color || variant?.couleur || "";
 
+const buildVariantValuesText = (taille, couleur) => {
+  const size = String(taille || "Unique").trim() || "Unique";
+  const color = String(couleur || DEFAULT_VARIANT_COLOR).trim();
+
+  return color ? `Taille: ${size} / Couleur: ${color}` : `Taille: ${size}`;
+};
+
+const getVariantValuesText = (variant) =>
+  String(
+    variant?.variantValuesText ||
+      variant?.valeursVariante ||
+      buildVariantValuesText(getVariantSizeValue(variant), getVariantColorValue(variant))
+  ).trim();
+
 const getVariantMatchKey = (productId, variant) =>
   String(
     variant?.id ||
@@ -121,12 +135,7 @@ const isDefaultVariantDraft = (variant) =>
   normalizeVariantKey("Unique", DEFAULT_VARIANT_COLOR);
 
 const getVariantTypeLabel = (variant) => {
-  const size = String(variant?.size || variant?.taille || "Unique").trim() || "Unique";
-  const color =
-    String(variant?.color || variant?.couleur || DEFAULT_VARIANT_COLOR).trim() ||
-    DEFAULT_VARIANT_COLOR;
-
-  return `${size} / ${color}`;
+  return getVariantValuesText(variant);
 };
 
 const formatQuantityValue = (value) =>
@@ -221,6 +230,7 @@ const createVariantDraft = (variant = null, product = null) => ({
   id: variant?.id || null,
   taille: variant?.size || variant?.taille || "Unique",
   couleur: variant?.color || variant?.couleur || DEFAULT_VARIANT_COLOR,
+  valeursVariante: getVariantValuesText(variant),
   codeBarres: variant?.barcode || variant?.codeBarres || "",
   prixAchat: resolveVariantNumber(
     variant?.purchasePrice,
@@ -285,16 +295,71 @@ const createInitialBarcodeExportState = () => ({
 const getProductWriteUrl = () =>
   api.defaults.baseURL?.replace(/\/api\/?$/, "/products") || "/products";
 
-const PRODUCTS_QUERY_PARAMS = {
-  params: {
-    page: 1,
-    limit: 500,
-  },
+const getProductsCatalogResource = () => cacheResources.productsCatalog();
+const getSupplierAccountsResource = () =>
+  cacheResources.comptes({
+    type: "FOURNISSEUR",
+    view: "summary",
+  });
+const getProductCategoriesResource = () =>
+  cacheResources.productCategories({
+    activeOnly: true,
+  });
+
+const buildSuppliersFromProducts = (products = []) => {
+  const suppliersById = new Map();
+
+  products.forEach((product) => {
+    const supplierId = Number(
+      product?.compteId ?? product?.supplierCompteId ?? product?.supplierId ?? 0
+    );
+    const supplierName = String(product?.supplierName || "").trim();
+
+    if (!supplierId || !supplierName || suppliersById.has(supplierId)) {
+      return;
+    }
+
+    suppliersById.set(supplierId, {
+      id: supplierId,
+      name: supplierName,
+      nom: supplierName,
+    });
+  });
+
+  return Array.from(suppliersById.values()).sort((left, right) =>
+    String(left.name || left.nom || "").localeCompare(String(right.name || right.nom || ""), "fr")
+  );
 };
-const PRODUCTS_CACHE_KEY = CACHE_KEYS.products("catalog");
-const SUPPLIERS_CACHE_KEY = CACHE_KEYS.suppliers();
-const PRODUCT_CATEGORIES_CACHE_KEY = CACHE_KEYS.productCategories();
-const STORES_CACHE_KEY = CACHE_KEYS.stores();
+
+const buildCategoriesFromProducts = (products = []) => {
+  const categoriesById = new Map();
+
+  products.forEach((product) => {
+    const categoryId = Number(product?.categoryId ?? 0);
+    const categoryName = String(product?.category || product?.categoryFullName || "").trim();
+    const categoryFullName = String(product?.categoryFullName || categoryName).trim();
+    const categoryCode = String(product?.categoryCode || "").trim();
+
+    if (!categoryId || !categoryName || categoriesById.has(categoryId)) {
+      return;
+    }
+
+    categoriesById.set(categoryId, {
+      id: categoryId,
+      code: categoryCode || null,
+      name: categoryName,
+      nom: categoryName,
+      fullName: categoryFullName || categoryName,
+      nomComplet: categoryFullName || categoryName,
+      active: true,
+      actif: true,
+    });
+  });
+
+  return Array.from(categoriesById.values()).sort((left, right) =>
+    String(left.name || left.nom || "").localeCompare(String(right.name || right.nom || ""), "fr")
+  );
+};
 
 const buildProductPayload = (formData) => ({
   ...(formData.codeBarres.trim() ? { codeBarres: formData.codeBarres.trim() } : {}),
@@ -532,6 +597,8 @@ function ProductsPage() {
   const [isLoadingCategories, setIsLoadingCategories] = useState(true);
   const [isLoadingStores, setIsLoadingStores] = useState(true);
   const [storesError, setStoresError] = useState("");
+  const [hasLoadedSuppliersFromApi, setHasLoadedSuppliersFromApi] = useState(false);
+  const [hasLoadedCategoriesFromApi, setHasLoadedCategoriesFromApi] = useState(false);
   const [productModal, setProductModal] = useState({
     isOpen: false,
     mode: "add",
@@ -577,6 +644,21 @@ function ProductsPage() {
   const currentUser = getCurrentUser();
   const canManageProducts = currentUser?.role === "admin";
 
+  const applyDerivedReferenceData = useCallback(
+    (nextProducts) => {
+      if (!canManageProducts) {
+        return;
+      }
+
+      const derivedSuppliers = buildSuppliersFromProducts(nextProducts);
+      const derivedCategories = buildCategoriesFromProducts(nextProducts);
+
+      setSuppliers((current) => (current.length ? current : derivedSuppliers));
+      setCategories((current) => (current.length ? current : derivedCategories));
+    },
+    [canManageProducts]
+  );
+
   const toggleProductVariants = (productId) => {
     setExpandedProductIds((current) => ({
       ...current,
@@ -585,170 +667,89 @@ function ProductsPage() {
   };
 
   const fetchProducts = async () => {
-    const response = await api.get("/products", PRODUCTS_QUERY_PARAMS);
-    const nextProducts = getCollection(response.data, ["data", "products"]);
+    const nextProducts = await refreshCachedResource(getProductsCatalogResource());
     setProducts(nextProducts);
-    writeCache(PRODUCTS_CACHE_KEY, nextProducts);
+    applyDerivedReferenceData(nextProducts);
     return nextProducts;
   };
 
   const fetchSuppliers = async () => {
-    const response = await api.getSupplierAccounts();
-    const suppliersList = getCollection(response.data, ["data", "comptes"]);
+    const suppliersList = await refreshCachedResource(getSupplierAccountsResource());
     setSuppliers(suppliersList);
-    writeCache(SUPPLIERS_CACHE_KEY, suppliersList);
+    setHasLoadedSuppliersFromApi(true);
     return suppliersList;
   };
 
   const fetchCategories = async () => {
-    const response = await api.getProductCategories({
-      params: {
-        activeOnly: true,
-      },
-    });
-    const nextCategories = getCollection(response.data, ["categories", "data"]);
+    const nextCategories = await refreshCachedResource(getProductCategoriesResource());
     setCategories(nextCategories);
-    writeCache(PRODUCT_CATEGORIES_CACHE_KEY, nextCategories);
+    setHasLoadedCategoriesFromApi(true);
     return nextCategories;
-  };
-
-  const fetchStores = async () => {
-    try {
-      const response = await api.get("/stores");
-      const storesList = getStoresCollection(response.data);
-      setStores(storesList);
-      setStoresError("");
-      writeCache(STORES_CACHE_KEY, storesList);
-      return storesList;
-    } catch (error) {
-      const message =
-        error.response?.data?.message ||
-        "Impossible de charger les magasins pour le moment.";
-      setStores([]);
-      setStoresError(message);
-      throw error;
-    }
   };
 
   useEffect(() => {
     let isMounted = true;
 
     async function loadPageData() {
-      const productsCache = readCache(PRODUCTS_CACHE_KEY, CACHE_TTL_MS);
-      const suppliersCache = readCache(SUPPLIERS_CACHE_KEY, CACHE_TTL_MS);
-      const categoriesCache = readCache(PRODUCT_CATEGORIES_CACHE_KEY, CACHE_TTL_MS);
-      const storesCache = readCache(STORES_CACHE_KEY, CACHE_TTL_MS);
-
-      if (productsCache && isMounted) {
-        setProducts(Array.isArray(productsCache.data) ? productsCache.data : []);
-      }
-
-      if (canManageProducts && suppliersCache && isMounted) {
-        setSuppliers(Array.isArray(suppliersCache.data) ? suppliersCache.data : []);
-      }
-
-      if (canManageProducts && categoriesCache && isMounted) {
-        setCategories(Array.isArray(categoriesCache.data) ? categoriesCache.data : []);
-      }
-
-      if (canManageProducts && storesCache && isMounted) {
-        setStores(Array.isArray(storesCache.data) ? storesCache.data : []);
-        setStoresError("");
-      }
-
       cleanupLegacyStoreCache();
-      setIsLoading(!productsCache);
-      setIsLoadingSuppliers(canManageProducts ? !suppliersCache : false);
-      setIsLoadingCategories(canManageProducts ? !categoriesCache : false);
-      setIsLoadingStores(canManageProducts ? !storesCache : false);
+      setIsLoading(true);
+      setIsLoadingSuppliers(false);
+      setIsLoadingCategories(false);
+      setIsLoadingStores(false);
       setErrorMessage("");
       setStoresError("");
-
-      const requests = [api.get("/products", PRODUCTS_QUERY_PARAMS)];
-
-      if (canManageProducts) {
-        requests.push(api.getSupplierAccounts());
-        requests.push(
-          api.getProductCategories({
-            params: {
-              activeOnly: true,
-            },
-          })
-        );
-        requests.push(api.get("/stores"));
-      }
-
-      const [productsResult, suppliersResult, categoriesResult, storesResult] =
-        await Promise.allSettled(requests);
-
-      if (!isMounted) {
-        return;
-      }
-
-      if (productsResult.status === "fulfilled") {
-        const nextProducts = getCollection(productsResult.value.data, ["data", "products"]);
-        setProducts(nextProducts);
-        writeCache(PRODUCTS_CACHE_KEY, nextProducts);
-      } else if (!productsCache) {
-        setErrorMessage(
-          productsResult.reason?.response?.data?.message ||
-            "Impossible de charger les produits pour le moment."
-        );
-      }
+      setHasLoadedSuppliersFromApi(false);
+      setHasLoadedCategoriesFromApi(false);
 
       if (!canManageProducts) {
         setSuppliers([]);
         setCategories([]);
         setStores([]);
-      } else if (suppliersResult?.status === "fulfilled") {
-        const nextSuppliers = getCollection(suppliersResult.value.data, ["data", "comptes"]);
-        setSuppliers(nextSuppliers);
-        writeCache(SUPPLIERS_CACHE_KEY, nextSuppliers);
-      } else if (!suppliersCache) {
-        setNotice({
-          type: "warning",
-          message:
-            suppliersResult?.reason?.response?.data?.message ||
-            "Impossible de charger les fournisseurs pour le moment.",
-        });
       }
 
-      if (!canManageProducts) {
-        setCategories([]);
-      } else if (categoriesResult?.status === "fulfilled") {
-        const nextCategories = getCollection(categoriesResult.value.data, ["categories", "data"]);
-        setCategories(nextCategories);
-        writeCache(PRODUCT_CATEGORIES_CACHE_KEY, nextCategories);
-      } else if (!categoriesCache) {
-        setNotice({
-          type: "warning",
-          message:
-            categoriesResult?.reason?.response?.data?.message ||
-            "Impossible de charger les categories produit pour le moment.",
-        });
+      const { hasCachedData, refreshPromise } = hydrateCachedResource({
+        resource: getProductsCatalogResource(),
+        onCachedData: (cachedProducts) => {
+          if (!isMounted) {
+            return;
+          }
+
+          const nextProducts = Array.isArray(cachedProducts) ? cachedProducts : [];
+          setProducts(nextProducts);
+          applyDerivedReferenceData(nextProducts);
+          setIsLoading(false);
+        },
+        onFreshData: (freshProducts) => {
+          if (!isMounted) {
+            return;
+          }
+
+          const nextProducts = Array.isArray(freshProducts) ? freshProducts : [];
+          setProducts(nextProducts);
+          applyDerivedReferenceData(nextProducts);
+        },
+        onError: (error, cachedEntry) => {
+          if (!isMounted || cachedEntry) {
+            return;
+          }
+
+          setErrorMessage(
+            error.response?.data?.message ||
+              "Impossible de charger les produits pour le moment."
+          );
+        },
+      });
+
+      if (!hasCachedData && isMounted) {
+        setIsLoading(true);
       }
 
-      if (!canManageProducts) {
-        setStores([]);
-        setStoresError("");
-      } else if (storesResult?.status === "fulfilled") {
-        const storesList = getStoresCollection(storesResult.value.data);
-        setStores(storesList);
-        setStoresError("");
-        writeCache(STORES_CACHE_KEY, storesList);
-      } else if (!storesCache) {
-        setStores([]);
-        setStoresError(
-          storesResult?.reason?.response?.data?.message ||
-            "Impossible de charger les magasins pour le moment."
-        );
-      }
-
-      if (isMounted) {
-        setIsLoading(false);
-        setIsLoadingSuppliers(false);
-        setIsLoadingCategories(false);
-        setIsLoadingStores(false);
+      try {
+        await refreshPromise;
+      } finally {
+        if (isMounted) {
+          setIsLoading(false);
+        }
       }
     }
 
@@ -757,7 +758,7 @@ function ProductsPage() {
     return () => {
       isMounted = false;
     };
-  }, [canManageProducts]);
+  }, [applyDerivedReferenceData, canManageProducts]);
 
   const searchResults = useMemo(() => {
     const query = normalizeSearchValue(searchTerm);
@@ -777,6 +778,7 @@ function ProductsPage() {
             normalizeSearchValue(getVariantBarcodeValue(variant)).includes(query) ||
             normalizeSearchValue(getVariantSizeValue(variant)).includes(query) ||
             normalizeSearchValue(getVariantColorValue(variant)).includes(query) ||
+            normalizeSearchValue(getVariantValuesText(variant)).includes(query) ||
             normalizeSearchValue(variantLabel).includes(query)
           );
         })
@@ -809,8 +811,25 @@ function ProductsPage() {
       return [];
     }
 
-    if (suppliers.length || isLoadingSuppliers) {
+    if (suppliers.length && hasLoadedSuppliersFromApi) {
       return suppliers;
+    }
+
+    if (suppliers.length) {
+      void fetchSuppliers().catch(() => {});
+      return suppliers;
+    }
+
+    const cachedSuppliers = readCachedResourceData(getSupplierAccountsResource(), []);
+
+    if (cachedSuppliers.length) {
+      setSuppliers(cachedSuppliers);
+      void fetchSuppliers().catch(() => {});
+      return cachedSuppliers;
+    }
+
+    if (isLoadingSuppliers) {
+      return [];
     }
 
     setIsLoadingSuppliers(true);
@@ -823,30 +842,37 @@ function ProductsPage() {
   };
 
   const ensureCategoriesLoaded = async () => {
-    if (!canManageProducts || categories.length || isLoadingCategories) {
-      return;
+    if (!canManageProducts) {
+      return [];
+    }
+
+    if (categories.length && hasLoadedCategoriesFromApi) {
+      return categories;
+    }
+
+    if (categories.length) {
+      void fetchCategories().catch(() => {});
+      return categories;
+    }
+
+    const cachedCategories = readCachedResourceData(getProductCategoriesResource(), []);
+
+    if (cachedCategories.length) {
+      setCategories(cachedCategories);
+      void fetchCategories().catch(() => {});
+      return cachedCategories;
+    }
+
+    if (isLoadingCategories) {
+      return [];
     }
 
     setIsLoadingCategories(true);
 
     try {
-      await fetchCategories();
+      return await fetchCategories();
     } finally {
       setIsLoadingCategories(false);
-    }
-  };
-
-  const ensureStoresLoaded = async () => {
-    if (!canManageProducts || stores.length || isLoadingStores) {
-      return stores;
-    }
-
-    setIsLoadingStores(true);
-
-    try {
-      return await fetchStores();
-    } finally {
-      setIsLoadingStores(false);
     }
   };
 
@@ -866,14 +892,13 @@ function ProductsPage() {
     try {
       const loadedSuppliers = await ensureSuppliersLoaded();
       await ensureCategoriesLoaded();
-      const loadedStores = await ensureStoresLoaded();
       const resolvedSuppliers =
         Array.isArray(loadedSuppliers) && loadedSuppliers.length ? loadedSuppliers : suppliers;
 
       setProductFormData(createInitialFormData(product, resolvedSuppliers));
 
       if (mode === "add") {
-        setInitialStocksByStore(createInitialStocksState(loadedStores || stores));
+        setInitialStocksByStore(createInitialStocksState(stores));
       }
     } catch (error) {
       setProductModalError(
@@ -1154,10 +1179,30 @@ function ProductsPage() {
     setProductVariants((current) =>
       current.map((variant, variantIndex) =>
         variantIndex === index
-          ? {
-              ...variant,
-              [field]: type === "checkbox" ? value : value,
-            }
+          ? (() => {
+              const nextVariant = {
+                ...variant,
+                [field]: type === "checkbox" ? value : value,
+              };
+
+              if (field === "taille" || field === "couleur") {
+                const previousGeneratedValues = buildVariantValuesText(
+                  variant.taille,
+                  variant.couleur
+                );
+                const nextGeneratedValues = buildVariantValuesText(
+                  field === "taille" ? value : nextVariant.taille,
+                  field === "couleur" ? value : nextVariant.couleur
+                );
+                const currentValuesText = String(variant.valeursVariante || "").trim();
+
+                if (!currentValuesText || currentValuesText === previousGeneratedValues) {
+                  nextVariant.valeursVariante = nextGeneratedValues;
+                }
+              }
+
+              return nextVariant;
+            })()
           : variant
       )
     );
@@ -1318,6 +1363,10 @@ function ProductsPage() {
             ...createVariantDraft(),
             taille: combination.taille,
             couleur: combination.couleur,
+            valeursVariante: buildVariantValuesText(
+              combination.taille,
+              combination.couleur
+            ),
             prixAchat: productFormData.prixAchat || "0",
             prixVente: productFormData.prixDetail || productFormData.prixVente || "0",
             seuilMinimum: productFormData.seuilMinimum || "0",
@@ -1437,6 +1486,11 @@ function ProductsPage() {
           ...(variant.id ? { id: variant.id } : {}),
           taille: variant.taille.trim(),
           couleur: variant.couleur.trim() || DEFAULT_VARIANT_COLOR,
+          valeursVariante:
+            String(
+              variant.valeursVariante ||
+                buildVariantValuesText(variant.taille, variant.couleur)
+            ).trim() || null,
           codeBarres: variant.codeBarres.trim() || null,
           prixAchat: Number(variant.prixAchat || productFormData.prixAchat || 0),
           prixVente: Number(variant.prixVente || productFormData.prixDetail || 0),
@@ -1456,9 +1510,6 @@ function ProductsPage() {
 
       invalidateDomainCaches("products:", "stock:", "stock-alerts");
       await fetchProducts();
-      if (canManageProducts) {
-        await fetchSuppliers();
-      }
       resetProductModal();
       setNotice({
         type: "success",
@@ -1564,14 +1615,14 @@ function ProductsPage() {
 
       <SectionCard
         title="Catalogue produits"
-        description="Rechercher une reference par nom ou code-barres."
+        description="Rechercher une reference par nom, categorie, code-barres ou texte de variante."
       >
         <div className="table-toolbar">
-          <SearchInput
-            value={searchTerm}
-            onChange={setSearchTerm}
-            placeholder="Rechercher par nom ou code-barres"
-          />
+            <SearchInput
+              value={searchTerm}
+              onChange={setSearchTerm}
+              placeholder="Rechercher par nom, code-barres, categorie ou variante"
+            />
         </div>
 
         {errorMessage ? (
@@ -1594,7 +1645,7 @@ function ProductsPage() {
           emptyDescription={
             isLoading
               ? "Veuillez patienter pendant la recuperation des donnees."
-              : "Essayez un autre nom ou code-barres."
+              : "Essayez un autre nom, code-barres, categorie ou texte de variante."
           }
           renderRow={(product) => {
             const variants = getProductVariants(product);
@@ -1815,7 +1866,7 @@ function ProductsPage() {
         isOpen={importModal.isOpen}
         eyebrow="Import produits"
         title="Importer produits"
-        description="Chargez un fichier Excel ou CSV avec une ligne par variante: nom, codeBarres, categorie, prixAchat, prixVente, stock, taille, couleur. Si codeBarres est vide, un EAN-13 sera genere."
+        description="Chargez un fichier Excel ou CSV avec une ligne par variante. Formats acceptes: ancien format `nom, codeBarres, categorie, prixAchat, prixVente, stock, taille, couleur` ou nouveau format `nom, codeBarres, categorie, cout, prixVente, quantiteDisponible, valeursVariante`. Si codeBarres est vide, un EAN-13 sera genere."
         onClose={closeImportModal}
         actions={
           <>
@@ -2090,6 +2141,7 @@ function ProductsPage() {
                   <tr>
                     <th>Taille</th>
                     <th>Couleur</th>
+                    <th>Valeurs variante</th>
                     <th>Code-barres</th>
                     <th>Prix achat</th>
                     <th>Prix vente</th>
@@ -2120,6 +2172,21 @@ function ProductsPage() {
                           onChange={(event) =>
                             handleVariantChange(index, "couleur", event.target.value)
                           }
+                        />
+                      </td>
+                      <td>
+                        <input
+                          className="text-input variant-input"
+                          type="text"
+                          value={variant.valeursVariante}
+                          onChange={(event) =>
+                            handleVariantChange(
+                              index,
+                              "valeursVariante",
+                              event.target.value
+                            )
+                          }
+                          placeholder="Ex: Pointure:42 / Couleur:Noir"
                         />
                       </td>
                       <td>

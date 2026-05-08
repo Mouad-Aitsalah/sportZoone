@@ -16,11 +16,13 @@ const {
   productUpdateSchema,
 } = require("../utils/validationSchemas");
 const {
+  buildVariantValuesText,
   DEFAULT_VARIANT_SIZE,
   decimalToNumber,
   getVariantColor,
   getVariantLabel,
   getVariantSize,
+  getVariantValuesText,
   normalizeVariantText,
   sumVariantStock,
   toApiVariant,
@@ -31,16 +33,14 @@ const PRODUCT_BARCODE_CONFLICT_MESSAGE =
 const VARIANT_BARCODE_CONFLICT_MESSAGE =
   "Ce code-barres de variante est deja utilise";
 const IMPORT_DEFAULT_VARIANT_COLOR = "Standard";
-const PRODUCT_IMPORT_HEADERS = [
-  "nom",
-  "codebarres",
-  "categorie",
-  "prixachat",
-  "prixvente",
-  "stock",
-  "taille",
-  "couleur",
+const DEFAULT_IMPORT_CATEGORY_NAME = "Autre";
+const PRODUCT_IMPORT_REQUIRED_HEADERS = [
+  { label: "nom", keys: ["nom"] },
+  { label: "prixAchat/cout", keys: ["prixachat", "cout"] },
+  { label: "prixVente", keys: ["prixvente"] },
+  { label: "stock/quantiteDisponible", keys: ["stock", "quantitedisponible"] },
 ];
+const VARIANT_COLOR_KEYS = ["couleur", "color", "col"];
 
 const parseId = (value) => {
   const parsedValue = Number(value);
@@ -50,6 +50,10 @@ const parseId = (value) => {
 const normalizeRequiredString = (value) => String(value || "").trim();
 
 const normalizeImportHeader = (value) => normalizeRequiredString(value).toLowerCase();
+const normalizeLooseImportKey = (value) =>
+  normalizeImportHeader(value)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
 
 const normalizeImportNumberString = (value) =>
   normalizeRequiredString(value).replace(/\s+/g, "").replace(",", ".");
@@ -206,11 +210,74 @@ const buildImportRowMap = (row) =>
     Object.entries(row || {}).map(([key, value]) => [normalizeImportHeader(key), value])
   );
 
+const getImportRowValue = (row, keys = []) => {
+  for (const key of keys) {
+    if (row.has(key)) {
+      return row.get(key);
+    }
+  }
+
+  return "";
+};
+
+const extractVariantFieldsFromValuesText = (rawValue) => {
+  const valeursVariante = normalizeRequiredString(rawValue);
+
+  if (!valeursVariante) {
+    return {
+      valeursVariante: null,
+      taille: null,
+      couleur: null,
+    };
+  }
+
+  const segments = valeursVariante
+    .split("/")
+    .map((segment) => normalizeRequiredString(segment))
+    .filter(Boolean);
+  let taille = null;
+  let couleur = null;
+
+  for (const segment of segments) {
+    const separatorIndex = segment.indexOf(":");
+    const key =
+      separatorIndex >= 0
+        ? normalizeLooseImportKey(segment.slice(0, separatorIndex))
+        : "";
+    const value = normalizeRequiredString(
+      separatorIndex >= 0 ? segment.slice(separatorIndex + 1) : segment
+    );
+
+    if (!value) {
+      continue;
+    }
+
+    if (key && VARIANT_COLOR_KEYS.some((candidate) => key.includes(candidate))) {
+      if (!couleur) {
+        couleur = value;
+      }
+      continue;
+    }
+
+    if (!taille) {
+      taille = value;
+    }
+  }
+
+  return {
+    valeursVariante,
+    taille,
+    couleur,
+  };
+};
+
 const validateImportHeaders = (rows) => {
   const headers = new Set(
     rows.flatMap((row) => Object.keys(row || {}).map((key) => normalizeImportHeader(key)))
   );
-  const missingHeaders = PRODUCT_IMPORT_HEADERS.filter((header) => !headers.has(header));
+  const missingHeaders = PRODUCT_IMPORT_REQUIRED_HEADERS.filter(
+    ({ keys }) => !keys.some((key) => headers.has(key))
+  ).map(({ label }) => label);
 
   if (missingHeaders.length > 0) {
     throw {
@@ -270,14 +337,33 @@ const normalizeImportProductRow = (rawRow) => {
   const row = buildImportRowMap(rawRow);
   const nom = normalizeRequiredString(row.get("nom"));
   const codeBarres = normalizeRequiredString(row.get("codebarres"));
-  const categorie = normalizeRequiredString(row.get("categorie"));
-  const taille = normalizeVariantText(row.get("taille"), DEFAULT_VARIANT_SIZE);
+  const rawCategorie = getImportRowValue(row, ["categorie"]);
+  const categorieNom =
+    rawCategorie?.trim() || "Autre";
+  const categorie = normalizeRequiredString(categorieNom || DEFAULT_IMPORT_CATEGORY_NAME);
+  const parsedVariantFields = extractVariantFieldsFromValuesText(
+    getImportRowValue(row, ["valeursvariante"])
+  );
+  const taille = normalizeVariantText(
+    getImportRowValue(row, ["taille"]),
+    parsedVariantFields.taille || DEFAULT_VARIANT_SIZE
+  );
   const couleur =
-    normalizeVariantText(row.get("couleur"), IMPORT_DEFAULT_VARIANT_COLOR) ||
-    IMPORT_DEFAULT_VARIANT_COLOR;
-  const prixAchat = parseImportNumber(row.get("prixachat"));
+    normalizeVariantText(
+      getImportRowValue(row, ["couleur"]),
+      parsedVariantFields.couleur || IMPORT_DEFAULT_VARIANT_COLOR
+    ) || IMPORT_DEFAULT_VARIANT_COLOR;
+  const valeursVariante =
+    parsedVariantFields.valeursVariante ||
+    buildVariantValuesText({
+      taille,
+      couleur,
+    });
+  const prixAchat = parseImportNumber(getImportRowValue(row, ["prixachat", "cout"]));
   const prixVente = parseImportNumber(row.get("prixvente"));
-  const stock = parseImportNumber(row.get("stock"));
+  const stock = parseImportNumber(
+    getImportRowValue(row, ["stock", "quantitedisponible"])
+  );
 
   if (!nom) {
     throw {
@@ -286,31 +372,10 @@ const normalizeImportProductRow = (rawRow) => {
     };
   }
 
-  if (!categorie) {
-    throw {
-      status: 400,
-      message: "La categorie est obligatoire.",
-    };
-  }
-
-  if (!taille) {
-    throw {
-      status: 400,
-      message: "La taille est obligatoire.",
-    };
-  }
-
-  if (!couleur) {
-    throw {
-      status: 400,
-      message: "La couleur est obligatoire.",
-    };
-  }
-
   if (Number.isNaN(prixAchat) || prixAchat < 0) {
     throw {
       status: 400,
-      message: "prixAchat doit etre un nombre valide.",
+      message: "prixAchat/cout doit etre un nombre valide.",
     };
   }
 
@@ -336,6 +401,7 @@ const normalizeImportProductRow = (rawRow) => {
     categorieKey: categorie.toLowerCase(),
     taille,
     couleur,
+    valeursVariante,
     prixAchat,
     prixVente,
     stock,
@@ -456,8 +522,17 @@ const mapProductToResponse = (product) => {
   };
 };
 
-const buildVariantSignature = (size, color) =>
-  `${String(size || DEFAULT_VARIANT_SIZE).toLowerCase()}::${String(color || "").toLowerCase()}`;
+const buildVariantSignature = (size, color, valuesText = null) => {
+  const normalizedValuesText = normalizeRequiredString(valuesText).toLowerCase();
+
+  if (normalizedValuesText) {
+    return `values::${normalizedValuesText}`;
+  }
+
+  return `${String(size || DEFAULT_VARIANT_SIZE).toLowerCase()}::${String(
+    color || ""
+  ).toLowerCase()}`;
+};
 
 const normalizeVariantsInput = ({
   variants,
@@ -473,6 +548,7 @@ const normalizeVariantsInput = ({
         {
           taille: DEFAULT_VARIANT_SIZE,
           couleur: null,
+          valeursVariante: buildVariantValuesText(DEFAULT_VARIANT_SIZE, null),
           codeBarres: null,
           prixAchat: defaultPurchasePrice,
           prixVente: defaultSalePrice,
@@ -489,6 +565,8 @@ const normalizeVariantsInput = ({
     const parsedVariantId = parseOptionalPositiveInteger(variant?.id);
     const size = normalizeVariantText(variant?.taille, DEFAULT_VARIANT_SIZE);
     const color = normalizeVariantText(variant?.couleur, null);
+    const valuesText =
+      getVariantValuesText(variant) || buildVariantValuesText(size, color);
     const barcode = normalizeVariantText(variant?.codeBarres, null);
     const purchasePrice =
       variant?.prixAchat === undefined
@@ -555,7 +633,7 @@ const normalizeVariantsInput = ({
       seenBarcodes.add(normalizedBarcode);
     }
 
-    const signature = buildVariantSignature(size, color);
+    const signature = buildVariantSignature(size, color, valuesText);
 
     if (seenSignatures.has(signature)) {
       throw {
@@ -571,6 +649,7 @@ const normalizeVariantsInput = ({
       order: index,
       taille: size,
       couleur: color,
+      valeursVariante: valuesText,
       codeBarres: barcode,
       prixAchat: purchasePrice,
       prixVente: salePrice,
@@ -1065,6 +1144,7 @@ const createProduct = async (req, res) => {
           produitId: produitCree.id,
           taille: variant.taille,
           couleur: variant.couleur,
+          valeursVariante: variant.valeursVariante,
           codeBarres: variant.codeBarres,
           prixAchat: variant.prixAchat,
           prixVente: variant.prixVente,
@@ -1400,6 +1480,7 @@ const updateProduct = async (req, res) => {
               data: {
                 taille: variant.taille,
                 couleur: variant.couleur,
+                valeursVariante: variant.valeursVariante,
                 codeBarres: variant.codeBarres,
                 prixAchat: variant.prixAchat,
                 prixVente: variant.prixVente,
@@ -1415,6 +1496,7 @@ const updateProduct = async (req, res) => {
                 produitId: productId,
                 taille: variant.taille,
                 couleur: variant.couleur,
+                valeursVariante: variant.valeursVariante,
                 codeBarres: variant.codeBarres,
                 prixAchat: variant.prixAchat,
                 prixVente: variant.prixVente,
@@ -1582,6 +1664,34 @@ const importProducts = async (req, res) => {
       }
     }
 
+    const existingVariants = await prisma.produitVariante.findMany({
+      where: {
+        organisationId,
+        actif: true,
+      },
+      select: {
+        produitId: true,
+        taille: true,
+        couleur: true,
+        valeursVariante: true,
+      },
+    });
+    const variantSignaturesByProductId = new Map();
+
+    for (const variant of existingVariants) {
+      const signature = buildVariantSignature(
+        variant.taille,
+        variant.couleur,
+        variant.valeursVariante
+      );
+
+      if (!variantSignaturesByProductId.has(variant.produitId)) {
+        variantSignaturesByProductId.set(variant.produitId, new Set());
+      }
+
+      variantSignaturesByProductId.get(variant.produitId).add(signature);
+    }
+
     const categories = await prisma.categorieProduit.findMany({
       where: {
         organisationId,
@@ -1674,6 +1784,21 @@ const importProducts = async (req, res) => {
             createdProduct = true;
           }
 
+          const variantSignature = buildVariantSignature(
+            row.taille,
+            row.couleur,
+            row.valeursVariante
+          );
+          const productVariantSignatures =
+            variantSignaturesByProductId.get(product.id) || new Set();
+
+          if (productVariantSignatures.has(variantSignature)) {
+            throw {
+              status: 409,
+              message: "Cette variante existe deja pour ce produit.",
+            };
+          }
+
           const conflictingProduct = await tx.produit.findFirst({
             where: {
               organisationId,
@@ -1714,6 +1839,7 @@ const importProducts = async (req, res) => {
               produitId: product.id,
               taille: row.taille,
               couleur: row.couleur,
+              valeursVariante: row.valeursVariante,
               codeBarres: variantBarcode,
               prixAchat: row.prixAchat,
               prixVente: row.prixVente,
@@ -1762,6 +1888,7 @@ const importProducts = async (req, res) => {
             createdProduct,
             category,
             variantId: createdVariant.id,
+            variantSignature,
           };
         });
 
@@ -1779,6 +1906,10 @@ const importProducts = async (req, res) => {
         importedVariants += 1;
         usedBarcodes.add(variantBarcode.toLowerCase());
         touchedProductIds.add(result.product.id);
+        if (!variantSignaturesByProductId.has(result.product.id)) {
+          variantSignaturesByProductId.set(result.product.id, new Set());
+        }
+        variantSignaturesByProductId.get(result.product.id).add(result.variantSignature);
       } catch (error) {
         const importRowMap = buildImportRowMap(rawRow);
 

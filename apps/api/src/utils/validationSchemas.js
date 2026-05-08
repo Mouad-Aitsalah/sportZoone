@@ -211,6 +211,7 @@ const productVariantSchema = z.object({
   id: optionalPositiveInt("La variante"),
   taille: optionalString("La taille"),
   couleur: optionalString("La couleur"),
+  valeursVariante: optionalString("Les valeurs variante"),
   codeBarres: optionalString("Le code-barres variante"),
   prixAchat: nonNegativeNumber("Le prix d'achat variante").optional(),
   prixVente: nonNegativeNumber("Le prix de vente variante").optional(),

@@ -6,6 +6,7 @@ const prisma = require("../config/prisma");
 const { isValidEAN13 } = require("../utils/barcode");
 const { createHttpError } = require("../utils/httpError");
 const { getOrganisationIdFromUser } = require("../utils/organisationScope");
+const { getVariantLabel } = require("../services/productVariantService");
 
 const isBlankString = (value) => typeof value === "string" && value.trim() === "";
 
@@ -148,12 +149,7 @@ const getEmployeeStoreId = (user) => {
   return user.pointDeVenteId || null;
 };
 
-const getVariantBarcodeLabel = (variant) => {
-  const size = normalizeRequiredString(variant?.taille || "Unique") || "Unique";
-  const color = normalizeRequiredString(variant?.couleur || "");
-
-  return color ? `${size} / ${color}` : size;
-};
+const getVariantBarcodeLabel = (variant) => getVariantLabel(variant);
 
 const getBarcodeImageBuffer = async (barcode) =>
   bwipjs.toBuffer({

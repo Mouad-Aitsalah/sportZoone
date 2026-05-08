@@ -47,6 +47,7 @@ const {
   getVariantColor,
   getVariantLabel,
   getVariantSize,
+  getVariantValuesText,
   sumVariantStock,
   toApiVariant,
 } = require("../services/productVariantService");
@@ -104,6 +105,9 @@ const PAYMENT_METHOD_ALIASES = {
 };
 
 const SALE_TOTAL_TOLERANCE = new Prisma.Decimal("0.01");
+const MAX_PAGINATION_LIMIT = 500;
+const createTimerLabel = (route) =>
+  `[perf] ${route} ${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 
 const getPaginationParams = (query) => {
   const rawPage = query.page;
@@ -122,21 +126,26 @@ const getPaginationParams = (query) => {
     throw createHttpError(400, "page and limit must be valid positive integers.");
   }
 
+  const normalizedLimit = Math.min(limit, MAX_PAGINATION_LIMIT);
+
   return {
     page,
-    limit,
-    skip: (page - 1) * limit,
+    limit: normalizedLimit,
+    skip: (page - 1) * normalizedLimit,
   };
 };
 
 const buildPaginatedResponse = ({ data, page, limit, total }) => ({
   data,
-  pagination: {
-    page,
-    limit,
-    total,
-    totalPages: total === 0 ? 0 : Math.ceil(total / limit),
-  },
+  pagination:
+    total === null || total === undefined
+      ? null
+      : {
+          page,
+          limit,
+          total,
+          totalPages: total === 0 ? 0 : Math.ceil(total / limit),
+        },
 });
 
 const logControllerDuration = (route, startedAt, metadata = {}) => {
@@ -310,6 +319,8 @@ const buildVariantSummary = (variant, product = null) => ({
   id: variant?.id || null,
   size: getVariantSize(variant),
   color: getVariantColor(variant),
+  valeursVariante: getVariantValuesText(variant) || getVariantLabel(variant),
+  variantValuesText: getVariantValuesText(variant) || getVariantLabel(variant),
   label: getVariantLabel(variant),
   barcode: variant?.codeBarres || null,
   salePrice:
@@ -430,10 +441,19 @@ const toApiStock = (stock, options = {}) => {
     id: stock.id,
     productId: stock.productId ?? stock.produitId,
     productName: stock.productName ?? stock.produit?.nom ?? "",
+    category: stock.category ?? stock.produit?.categorie ?? "",
     variantId: stock.variantId ?? stock.varianteId ?? stock.variante?.id ?? null,
     variantSize,
     variantColor,
     variantLabel,
+    valeursVariante:
+      stock.valeursVariante ??
+      stock.variante?.valeursVariante ??
+      variantLabel,
+    variantValuesText:
+      stock.valeursVariante ??
+      stock.variante?.valeursVariante ??
+      variantLabel,
     barcode: stock.barcode ?? stock.produit?.codeBarres ?? "",
     storeId: stock.storeId ?? stock.pointDeVenteId,
     storeName: stock.storeName ?? stock.pointDeVente?.nom ?? "",
@@ -1182,10 +1202,13 @@ const login = async (req, res) => {
 
 const getProducts = async (req, res) => {
   const startedAt = Date.now();
+  const timerLabel = createTimerLabel("GET /api/products");
+  console.time(timerLabel);
   const organisationId = getOrganisationIdFromUser(req.user);
   const productView = normalizeOptionalString(req.query.view)?.toLowerCase() || "default";
   const includeSalesStats =
     productView !== "pos" && String(req.query.includeSalesStats || "").toLowerCase() !== "false";
+  const includePagination = String(req.query.includePagination || "").toLowerCase() !== "false";
   const { page, limit, skip } = getPaginationParams(req.query);
   const productSelect = {
     id: true,
@@ -1232,6 +1255,7 @@ const getProducts = async (req, res) => {
         id: true,
         taille: true,
         couleur: true,
+        valeursVariante: true,
         codeBarres: true,
         prixAchat: true,
         prixVente: true,
@@ -1243,11 +1267,13 @@ const getProducts = async (req, res) => {
   };
   try {
     const [total, products] = await Promise.all([
-      prisma.produit.count({
-        where: {
-          organisationId,
-        },
-      }),
+      includePagination
+        ? prisma.produit.count({
+            where: {
+              organisationId,
+            },
+          })
+        : Promise.resolve(null),
       prisma.produit.findMany({
         where: {
           organisationId,
@@ -1336,12 +1362,14 @@ const getProducts = async (req, res) => {
       })
     );
   } finally {
+    console.timeEnd(timerLabel);
     logControllerDuration("GET /api/products", startedAt, {
       organisationId,
       page,
       limit,
       view: productView,
       includeSalesStats,
+      includePagination,
     });
   }
 };
@@ -1410,6 +1438,7 @@ const getProductSales = async (req, res) => {
           id: true,
           taille: true,
           couleur: true,
+          valeursVariante: true,
           codeBarres: true,
         },
       },
@@ -1633,6 +1662,7 @@ const getStocks = async (req, res) => {
           id: true,
           nom: true,
           codeBarres: true,
+          categorie: true,
           seuilMinimum: true,
           prixAchat: true,
         },
@@ -2146,6 +2176,7 @@ const createSale = async (req, res) => {
                           produitId: true,
                           taille: true,
                           couleur: true,
+                          valeursVariante: true,
                           codeBarres: true,
                           prixVente: true,
                           quantiteStock: true,
@@ -2697,14 +2728,15 @@ const getSales = async (req, res) => {
                 prixAchat: true,
               },
             },
-            variante: {
-              select: {
-                id: true,
-                taille: true,
-                couleur: true,
-                prixAchat: true,
-              },
-            },
+      variante: {
+        select: {
+          id: true,
+          taille: true,
+          couleur: true,
+          valeursVariante: true,
+          prixAchat: true,
+        },
+      },
           },
         },
         retours: {
@@ -4369,87 +4401,104 @@ const getUsers = async (req, res) => {
 };
 
 const getStores = async (req, res) => {
+  const startedAt = Date.now();
+  const timerLabel = createTimerLabel("GET /api/stores");
+  console.time(timerLabel);
   const organisationId = getOrganisationIdFromUser(req.user);
   const employeeStoreId = getEmployeeStoreId(req.user);
   const todayStart = getStartOfDay(new Date());
   const todayEnd = getEndOfDay(new Date());
-  const primaryStore =
-    req.user.role === "ADMIN" ? await getPrimaryStore(organisationId) : null;
+  let primaryStoreId = null;
 
   if (req.user.role === "EMPLOYE" && !employeeStoreId) {
     throw createHttpError(403, "Employee is not assigned to a store.");
   }
 
-  const [stores, todaySales] = await Promise.all([
-    prisma.pointDeVente.findMany({
-      where:
-        req.user.role === "EMPLOYE" && employeeStoreId
+  try {
+    const primaryStore =
+      req.user.role === "ADMIN" ? await getPrimaryStore(organisationId) : null;
+    primaryStoreId = primaryStore?.id || null;
+    const storeWhere =
+      req.user.role === "EMPLOYE" && employeeStoreId
+        ? {
+            organisationId,
+            id: employeeStoreId,
+          }
+        : {
+            organisationId,
+            ...(primaryStore?.id ? { id: primaryStore.id } : {}),
+          };
+    const salesWhere = {
+      organisationId,
+      dateVente: {
+        gte: todayStart,
+        lte: todayEnd,
+      },
+      ...(req.user.role === "EMPLOYE" && employeeStoreId
+        ? {
+            pointDeVenteId: employeeStoreId,
+          }
+        : primaryStore?.id
           ? {
-              organisationId,
-              id: employeeStoreId,
+              pointDeVenteId: primaryStore.id,
             }
-          : {
-              organisationId,
-              ...(primaryStore?.id ? { id: primaryStore.id } : {}),
+          : {}),
+    };
+
+    const [stores, todaySales] = await Promise.all([
+      prisma.pointDeVente.findMany({
+        where: storeWhere,
+        select: {
+          id: true,
+          nom: true,
+          adresse: true,
+          _count: {
+            select: {
+              utilisateurs: true,
+              caisses: true,
             },
-      include: {
-        _count: {
-          select: {
-            utilisateurs: true,
-            caisses: true,
           },
         },
-      },
-      orderBy: {
-        id: "desc",
-      },
-    }),
-    prisma.vente.findMany({
-      where: {
-        organisationId,
-        dateVente: {
-          gte: todayStart,
-          lte: todayEnd,
+        orderBy: {
+          id: "desc",
         },
-        ...(req.user.role === "EMPLOYE" && employeeStoreId
-          ? {
-              pointDeVenteId: employeeStoreId,
-            }
-          : primaryStore?.id
-            ? {
-                pointDeVenteId: primaryStore.id,
-              }
-            : {}),
-      },
-      select: {
-        pointDeVenteId: true,
-        total: true,
-      },
-    }),
-  ]);
+      }),
+      prisma.vente.groupBy({
+        by: ["pointDeVenteId"],
+        where: salesWhere,
+        _sum: {
+          total: true,
+        },
+      }),
+    ]);
 
-  const revenueByStore = new Map();
+    const revenueByStore = new Map(
+      todaySales.map((sale) => [sale.pointDeVenteId, sale._sum.total || new Prisma.Decimal(0)])
+    );
 
-  for (const sale of todaySales) {
-    const currentRevenue =
-      revenueByStore.get(sale.pointDeVenteId) || new Prisma.Decimal(0);
-    revenueByStore.set(sale.pointDeVenteId, currentRevenue.plus(sale.total));
+    return res.status(200).json(
+      stores.map((store) => ({
+        id: store.id,
+        name: store.nom,
+        city: extractCityFromAddress(store.adresse),
+        address: store.adresse || "",
+        usersCount: store._count.utilisateurs,
+        cashRegistersCount: store._count.caisses,
+        todayRevenue: decimalToNumber(
+          revenueByStore.get(store.id) || new Prisma.Decimal(0)
+        ),
+        status: "active",
+      }))
+    );
+  } finally {
+    console.timeEnd(timerLabel);
+    logControllerDuration("GET /api/stores", startedAt, {
+      organisationId,
+      role: req.user.role,
+      employeeStoreId,
+      primaryStoreId,
+    });
   }
-
-  return res.status(200).json(
-    stores.map((store) => ({
-      id: store.id,
-      name: store.nom,
-      city: extractCityFromAddress(store.adresse),
-      address: store.adresse || "",
-      usersCount: store._count.utilisateurs,
-      cashRegistersCount: store._count.caisses,
-      todayRevenue: decimalToNumber(
-        revenueByStore.get(store.id) || new Prisma.Decimal(0)
-      ),
-      status: "active",
-    }))
-  );
 };
 
 const getAutoReportStatus = async (req, res) =>

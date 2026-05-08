@@ -6,6 +6,7 @@ import Modal from "../components/Modal";
 import PaymentModal from "../components/PaymentModal";
 import SectionCard from "../components/SectionCard";
 import api from "../services/api";
+import { cacheResources, hydrateCachedResource } from "../services/cacheService";
 import { getOfflineSales, savePendingSale } from "../services/offlineDb";
 import { getCurrentUser } from "../store/authStore";
 import { useCart } from "../store/cartStore";
@@ -17,7 +18,7 @@ import {
   readCache,
   writeCache,
 } from "../utils/appCache";
-import { cleanupLegacyStoreCache, normalizeStores } from "../utils/storeAccess";
+import { cleanupLegacyStoreCache } from "../utils/storeAccess";
 import { formatCurrencyDh } from "../utils/formatters";
 
 const DEFAULT_CUSTOMER = {
@@ -31,7 +32,6 @@ const DEFAULT_CUSTOMER = {
 };
 
 const PRODUCTS_CACHE_KEY = CACHE_KEYS.products("pos");
-const STORES_CACHE_KEY = CACHE_KEYS.stores();
 const CUSTOMERS_CACHE_KEY = CACHE_KEYS.customers();
 const POS_PRODUCTS_QUERY = {
   params: {
@@ -39,6 +39,7 @@ const POS_PRODUCTS_QUERY = {
     limit: 500,
     view: "pos",
     includeSalesStats: false,
+    includePagination: false,
   },
 };
 
@@ -612,42 +613,63 @@ function PosPage() {
   useEffect(() => {
     let isMounted = true;
 
+    const applyStores = (list) => {
+      const nextStores = Array.isArray(list) ? list : [];
+
+      setStores(nextStores);
+      setSelectedStoreId((currentValue) => {
+        if (!isAdmin) {
+          return currentValue;
+        }
+
+        return nextStores.some((store) => store.id === currentValue)
+          ? currentValue
+          : nextStores[0]?.id || null;
+      });
+    };
+
     async function fetchStores() {
-      const storesCache = readCache(STORES_CACHE_KEY, CACHE_TTL_MS);
+      cleanupLegacyStoreCache();
 
-      if (storesCache && isMounted) {
-        const cachedStores = Array.isArray(storesCache.data) ? storesCache.data : [];
-        setStores(cachedStores);
-        setSelectedStoreId((currentValue) => {
-          if (!isAdmin) {
-            return currentValue;
-          }
-
-          return cachedStores.some((store) => store.id === currentValue)
-            ? currentValue
-            : cachedStores[0]?.id || null;
-        });
-      }
-
-      try {
-        const response = await api.get("/stores");
-        const list = normalizeStores(response.data);
+      if (!isAdmin) {
+        const currentStore =
+          currentUser?.storeId && currentUser?.storeName
+            ? [
+                {
+                  id: Number(currentUser.storeId),
+                  name: currentUser.storeName,
+                },
+              ]
+            : [];
 
         if (isMounted) {
-          setStores(list);
-          writeCache(STORES_CACHE_KEY, list);
-          setSelectedStoreId((currentValue) => {
-            if (!isAdmin) {
-              return currentValue;
-            }
-
-            return list.some((store) => store.id === currentValue)
-              ? currentValue
-              : list[0]?.id || null;
-          });
+          applyStores(currentStore);
         }
-      } catch (error) {
-        if (isMounted && !storesCache) {
+
+        return;
+      }
+
+      const { hasCachedData, refreshPromise } = hydrateCachedResource({
+        resource: cacheResources.stores(),
+        onCachedData: (cachedStores) => {
+          if (!isMounted) {
+            return;
+          }
+
+          applyStores(cachedStores);
+        },
+        onFreshData: (freshStores) => {
+          if (!isMounted) {
+            return;
+          }
+
+          applyStores(freshStores);
+        },
+        onError: (error, cachedEntry) => {
+          if (!isMounted || cachedEntry) {
+            return;
+          }
+
           setStores([]);
           setCashRegisters([]);
           setSelectedStoreId(null);
@@ -658,6 +680,14 @@ function PosPage() {
               error.response?.data?.message ||
               "Impossible de charger les points de vente.",
           });
+        },
+      });
+
+      try {
+        await refreshPromise;
+      } catch (error) {
+        if (!hasCachedData) {
+          return;
         }
       }
     }
@@ -667,7 +697,7 @@ function PosPage() {
     return () => {
       isMounted = false;
     };
-  }, [isAdmin]);
+  }, [currentUser?.storeId, currentUser?.storeName, isAdmin]);
 
   useEffect(() => {
     if (!isAdmin) {
@@ -878,35 +908,50 @@ function PosPage() {
       };
     }
 
-    const cachedSession = currentCashSessionCacheKey
-      ? readCache(currentCashSessionCacheKey, CACHE_TTL_MS)
-      : null;
+    const currentCashSessionResource = cacheResources.currentCashSession({
+      storeId: activeStoreId,
+      cashRegisterId: activeCashRegisterId,
+      userId: currentUser?.id,
+      view: "pos",
+    });
 
-    if (cachedSession && isMounted) {
-      setCachedCurrentCashSession(cachedSession.data || null);
-    }
-
-    setIsLoadingCashSession(!cachedSession);
+    setIsLoadingCashSession(true);
     void refreshOfflineArchiveSales();
 
     async function loadCurrentCashSession() {
-      try {
-        const response = await api.getCurrentCashSession({
-          params: {
-            storeId: activeStoreId,
-            cashRegisterId: activeCashRegisterId,
-            userId: currentUser?.id,
-            view: "pos",
-          },
-        });
+      const { hasCachedData, refreshPromise } = hydrateCachedResource({
+        resource: currentCashSessionResource,
+        onCachedData: (cachedSession) => {
+          if (!isMounted) {
+            return;
+          }
 
-        if (isMounted) {
-          setCachedCurrentCashSession(response.data?.data || null);
-        }
-      } catch (error) {
-        if (isMounted && !cachedSession) {
+          currentCashSessionRef.current = cachedSession || null;
+          setCurrentCashSession(cachedSession || null);
+          setIsLoadingCashSession(false);
+        },
+        onFreshData: (freshSession) => {
+          if (!isMounted) {
+            return;
+          }
+
+          setCachedCurrentCashSession(freshSession || null);
+        },
+        onError: (error, cachedEntry) => {
+          if (!isMounted || cachedEntry) {
+            return;
+          }
+
           setCachedCurrentCashSession(null);
-        }
+        },
+      });
+
+      if (!hasCachedData && isMounted) {
+        setIsLoadingCashSession(true);
+      }
+
+      try {
+        await refreshPromise;
       } finally {
         if (isMounted) {
           setIsLoadingCashSession(false);
@@ -1910,6 +1955,9 @@ function PosPage() {
                   <h3>{product.name}</h3>
                   <p>Code-barres: {product.barcode}</p>
                   <p>Prix: {formatCurrencyDh(product.salePrice || 0)}</p>
+                  {getActiveVariants(product).length === 1 ? (
+                    <p>Variante: {getActiveVariants(product)[0]?.label || "-"}</p>
+                  ) : null}
                   <p>
                     Variantes actives: {getActiveVariants(product).length || 1}
                   </p>
@@ -2320,6 +2368,7 @@ function PosPage() {
       >
         <DataTable
           columns={[
+            { key: "variant", label: "Variante" },
             { key: "size", label: "Taille" },
             { key: "color", label: "Couleur" },
             { key: "barcode", label: "Code-barres" },
@@ -2332,6 +2381,7 @@ function PosPage() {
           emptyDescription="Aucune variante active n'est disponible pour ce produit."
           renderRow={(variant) => (
             <tr key={variant.id}>
+              <td>{variant.label || "-"}</td>
               <td>{variant.size || variant.taille || "Unique"}</td>
               <td>{variant.color || variant.couleur || "-"}</td>
               <td>{variant.barcode || "-"}</td>

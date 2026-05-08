@@ -23,12 +23,48 @@ const normalizeVariantText = (value, fallback = null) => {
   return normalizedValue === "" ? fallback : normalizedValue;
 };
 
+const getVariantValuesText = (variant) =>
+  normalizeVariantText(
+    variant?.valeursVariante ??
+      variant?.variantValuesText ??
+      variant?.variantValues ??
+      variant?.valuesText,
+    null
+  );
+
 const getVariantSize = (variant) =>
   normalizeVariantText(variant?.taille, DEFAULT_VARIANT_SIZE);
 
 const getVariantColor = (variant) => normalizeVariantText(variant?.couleur, null);
 
+const buildVariantValuesText = (variantOrSize, maybeColor = null) => {
+  if (
+    variantOrSize &&
+    typeof variantOrSize === "object" &&
+    getVariantValuesText(variantOrSize)
+  ) {
+    return getVariantValuesText(variantOrSize);
+  }
+
+  const size =
+    variantOrSize && typeof variantOrSize === "object"
+      ? getVariantSize(variantOrSize)
+      : normalizeVariantText(variantOrSize, DEFAULT_VARIANT_SIZE);
+  const color =
+    variantOrSize && typeof variantOrSize === "object"
+      ? getVariantColor(variantOrSize)
+      : normalizeVariantText(maybeColor, null);
+
+  return color ? `Taille: ${size} / Couleur: ${color}` : `Taille: ${size}`;
+};
+
 const getVariantLabel = (variant) => {
+  const valuesText = getVariantValuesText(variant);
+
+  if (valuesText) {
+    return valuesText;
+  }
+
   const size = getVariantSize(variant);
   const color = getVariantColor(variant);
   return color ? `${size} / ${color}` : size;
@@ -60,6 +96,8 @@ const toApiVariant = (variant, product = null) => ({
   taille: getVariantSize(variant),
   color: getVariantColor(variant),
   couleur: getVariantColor(variant),
+  valeursVariante: getVariantValuesText(variant) || buildVariantValuesText(variant),
+  variantValuesText: getVariantValuesText(variant) || buildVariantValuesText(variant),
   label: getVariantLabel(variant),
   displayName: getVariantDisplayName(product?.nom || product?.name || "", variant),
   barcode: variant.codeBarres || null,
@@ -83,11 +121,13 @@ const toApiVariant = (variant, product = null) => ({
 module.exports = {
   DEFAULT_VARIANT_SIZE,
   buildProductVariantKey,
+  buildVariantValuesText,
   decimalToNumber,
   getVariantColor,
   getVariantDisplayName,
   getVariantLabel,
   getVariantSize,
+  getVariantValuesText,
   isDefaultVariant,
   normalizeVariantText,
   sumVariantStock,

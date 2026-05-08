@@ -48,6 +48,12 @@ const toApiCategory = (category) => ({
 });
 
 const getProductCategories = async (req, res) => {
+  const startedAt = Date.now();
+  const timerLabel = `[perf] GET /api/product-categories ${startedAt}-${Math.random()
+    .toString(16)
+    .slice(2, 8)}`;
+  console.time(timerLabel);
+
   try {
     const organisationId = getOrganisationIdFromUser(req.user);
     const activeOnly = req.query.activeOnly === "true";
@@ -56,6 +62,16 @@ const getProductCategories = async (req, res) => {
       where: {
         organisationId,
         ...(activeOnly ? { actif: true } : {}),
+      },
+      select: {
+        id: true,
+        organisationId: true,
+        code: true,
+        nom: true,
+        nomComplet: true,
+        actif: true,
+        createdAt: true,
+        updatedAt: true,
       },
       orderBy: [{ actif: "desc" }, { nom: "asc" }, { id: "asc" }],
     });
@@ -68,6 +84,8 @@ const getProductCategories = async (req, res) => {
     return res.status(500).json({
       message: "Erreur serveur lors de la recuperation des categories produit.",
     });
+  } finally {
+    console.timeEnd(timerLabel);
   }
 };
 

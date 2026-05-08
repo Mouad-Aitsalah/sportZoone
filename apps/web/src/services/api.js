@@ -10,6 +10,68 @@ const api = axios.create({
   },
 });
 
+const inFlightRequests = new Map();
+
+const sortObject = (value) => {
+  if (Array.isArray(value)) {
+    return value.map((entry) => sortObject(entry));
+  }
+
+  if (value && typeof value === "object") {
+    return Object.keys(value)
+      .sort()
+      .reduce((accumulator, key) => {
+        accumulator[key] = sortObject(value[key]);
+        return accumulator;
+      }, {});
+  }
+
+  return value;
+};
+
+const buildInFlightRequestKey = (config) =>
+  JSON.stringify({
+    baseURL: config.baseURL || api.defaults.baseURL || "",
+    method: String(config.method || "get").toLowerCase(),
+    url: api.getUri(config),
+    data:
+      config.data === undefined || config.data === null
+        ? null
+        : sortObject(config.data),
+  });
+
+const baseRequest = api.request.bind(api);
+
+api.request = (configOrUrl, maybeConfig) => {
+  const requestConfig =
+    typeof configOrUrl === "string"
+      ? {
+          ...(maybeConfig || {}),
+          url: configOrUrl,
+        }
+      : { ...(configOrUrl || {}) };
+
+  const method = String(requestConfig.method || "get").toLowerCase();
+
+  if (method !== "get") {
+    return baseRequest(requestConfig);
+  }
+
+  const requestKey = buildInFlightRequestKey(requestConfig);
+  const existingRequest = inFlightRequests.get(requestKey);
+
+  if (existingRequest) {
+    return existingRequest;
+  }
+
+  const requestPromise = baseRequest(requestConfig).finally(() => {
+    inFlightRequests.delete(requestKey);
+  });
+
+  inFlightRequests.set(requestKey, requestPromise);
+  return requestPromise;
+};
+
 const SUPPLIER_WRITE_BASE_URL =
   API_BASE_URL.replace(/\/api\/?$/, "/suppliers") || "http://localhost:5000/suppliers";
 
@@ -98,6 +160,7 @@ api.getCustomerAccounts = (config = {}) =>
     params: {
       ...(config.params || {}),
       type: "CLIENT",
+      view: config.params?.view || "summary",
     },
   });
 api.getSupplierAccounts = (config = {}) =>
@@ -106,6 +169,7 @@ api.getSupplierAccounts = (config = {}) =>
     params: {
       ...(config.params || {}),
       type: "FOURNISSEUR",
+      view: config.params?.view || "summary",
     },
   });
 api.importProducts = (file, config = {}) => {

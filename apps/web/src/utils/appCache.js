@@ -1,5 +1,5 @@
 const CACHE_STORAGE_PREFIX = "sportzone-cache:";
-const DEFAULT_CACHE_TTL_MS = 3 * 60 * 1000;
+const DEFAULT_CACHE_TTL_MS = 5 * 60 * 1000;
 const memoryCache = new Map();
 
 const now = () => Date.now();
@@ -99,6 +99,7 @@ export const CACHE_KEYS = {
   cashRegisters: (storeId) => `cash-registers:${storeId || "default"}`,
   currentCashSession: (storeId, cashRegisterId, userId = "current") =>
     `cash-session:${storeId || "default"}:${cashRegisterId || "default"}:${userId || "current"}`,
+  comptes: (scope = "all") => `comptes:${scope}`,
   customers: () => "customers",
   productCategories: () => "product-categories",
   products: (scope = "default") => `products:${scope}`,
