@@ -394,6 +394,14 @@ const getLineNetProfit = (line) => {
 };
 
 const getStockStatusMeta = (quantity, minimumThreshold) => {
+  if (quantity < 0) {
+    return {
+      status: "Stock negatif",
+      isLowStock: true,
+      severity: "critical",
+    };
+  }
+
   if (quantity === 0) {
     return {
       status: "Rupture",
@@ -2168,7 +2176,7 @@ const stockCorrection = async (req, res) => {
   const productId = parsePositiveInteger(parsedInput.productId);
   const variantId = parseOptionalPositiveInteger(parsedInput.variantId);
   const storeId = parsePositiveInteger(parsedInput.storeId);
-  const quantity = parseNonNegativeInteger(parsedInput.quantity);
+  const quantity = parseRequiredNumber(parsedInput.quantity, "quantity must be a valid number");
   const reason = normalizeOptionalString(parsedInput.reason);
 
   await ensureProductAndStoreExist(req.user, productId, storeId);
@@ -2547,13 +2555,6 @@ const createSale = async (req, res) => {
                 throw createHttpError(
                   400,
                   `Variant ${getVariantLabel(variant)} is inactive for product ${produit.nom}.`
-                );
-              }
-
-              if (Number(variant.quantiteStock || 0) < item.quantity) {
-                throw createHttpError(
-                  400,
-                  `Insufficient stock for ${produit.nom} / ${getVariantLabel(variant)}.`
                 );
               }
 

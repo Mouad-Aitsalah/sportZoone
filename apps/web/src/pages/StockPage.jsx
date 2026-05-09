@@ -227,7 +227,10 @@ function StockPage() {
 
     const validationMessage = validateForm();
 
-    if (validationMessage) {
+    if (
+      validationMessage &&
+      !(stockModal.mode === "correction" && Number.isFinite(Number(formData.quantity)))
+    ) {
       setModalError(validationMessage);
       return;
     }
@@ -371,8 +374,11 @@ function StockPage() {
           renderRow={(item) => {
             const isCritical = item.severity === "critical";
             const isLow = item.isLowStock;
+            const isNegativeStock = Number(item.quantity || 0) < 0;
             const stockStatus = item.status || (isCritical
-              ? "Rupture"
+              ? isNegativeStock
+                ? "Stock negatif"
+                : "Rupture"
               : isLow
               ? "Stock faible"
               : "Disponible");
@@ -391,7 +397,11 @@ function StockPage() {
                 <td>{item.variantSize || "Unique"}</td>
                 <td>{item.variantColor || "-"}</td>
                 <td>{item.barcode}</td>
-                <td>{item.quantity}</td>
+                <td>
+                  <span className={isNegativeStock ? "stock-negative-value" : ""}>
+                    {item.quantity}
+                  </span>
+                </td>
                 {canViewFinancialStock ? (
                   <td>
                     {formatCurrencyDh(
@@ -512,13 +522,12 @@ function StockPage() {
             <label className="field-label" htmlFor="stock-quantity">
               {quantityLabel}
             </label>
-            <input
-              id="stock-quantity"
-              className="text-input"
-              type="number"
-              min="0"
-              step="0.25"
-              name="quantity"
+              <input
+                id="stock-quantity"
+                className="text-input"
+                type="number"
+                step="0.25"
+                name="quantity"
               placeholder={quantityPlaceholder}
               value={formData.quantity}
               onChange={handleFormChange}

@@ -136,7 +136,7 @@ const parseOptionalNonNegativeInteger = (value) => {
   return Number.isInteger(parsedValue) && parsedValue >= 0 ? parsedValue : NaN;
 };
 
-const parseOptionalNonNegativeQuantity = (value) => {
+const parseOptionalQuantity = (value) => {
   if (value === undefined || value === null) {
     return null;
   }
@@ -146,7 +146,7 @@ const parseOptionalNonNegativeQuantity = (value) => {
   }
 
   const parsedValue = Number(value);
-  return Number.isFinite(parsedValue) && parsedValue >= 0 ? parsedValue : NaN;
+  return Number.isFinite(parsedValue) ? parsedValue : NaN;
 };
 
 const parseRequiredNumber = (value) => {
@@ -181,7 +181,7 @@ const normalizeInitialStocks = (value) => {
     quantity:
       entry?.quantity === undefined
         ? 0
-        : parseOptionalNonNegativeQuantity(entry?.quantity),
+        : parseOptionalQuantity(entry?.quantity),
   }));
 };
 
@@ -386,7 +386,7 @@ const normalizeImportProductRow = (rawRow) => {
     };
   }
 
-  if (Number.isNaN(stock) || stock < 0) {
+  if (Number.isNaN(stock)) {
     throw {
       status: 400,
       message: "stock doit etre un nombre valide.",
@@ -579,7 +579,7 @@ const normalizeVariantsInput = ({
     const stockQuantity =
       variant?.quantiteStock === undefined
         ? 0
-        : parseOptionalNonNegativeQuantity(variant?.quantiteStock);
+        : parseOptionalQuantity(variant?.quantiteStock);
     const minimumThreshold =
       variant?.seuilMinimum === undefined
         ? defaultThreshold
@@ -992,8 +992,8 @@ const createProduct = async (req, res) => {
       Number.isNaN(parsedSeuilMinimum)
     ) {
       return res.status(400).json({
-        message:
-          "Les prix, la TVA et le seuil minimum doivent contenir des valeurs valides.",
+          message:
+            "Les prix, la TVA et le seuil minimum doivent contenir des valeurs valides.",
       });
     }
 
@@ -1017,18 +1017,18 @@ const createProduct = async (req, res) => {
 
     if (
       normalizedInitialStocks.some(
-        (entry) =>
-          Number.isNaN(entry.storeId) ||
-          entry.storeId === null ||
-          Number.isNaN(entry.quantity) ||
-          entry.quantity === null
-      )
-    ) {
-      return res.status(400).json({
-        message:
-          "Chaque stock initial doit contenir un storeId valide et une quantite superieure ou egale a 0.",
-      });
-    }
+          (entry) =>
+            Number.isNaN(entry.storeId) ||
+            entry.storeId === null ||
+            Number.isNaN(entry.quantity) ||
+            entry.quantity === null
+        )
+      ) {
+        return res.status(400).json({
+          message:
+            "Chaque stock initial doit contenir un storeId valide et une quantite valide.",
+        });
+      }
 
     const totalInitialQuantity = normalizedInitialStocks.reduce(
       (sum, entry) => sum + Number(entry.quantity || 0),

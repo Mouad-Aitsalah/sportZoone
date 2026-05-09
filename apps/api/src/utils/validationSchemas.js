@@ -5,6 +5,7 @@ const {
   emailString,
   optionalEmailString,
   optionalPhoneString,
+  numberValue,
   positiveNumber,
   nonNegativeNumber,
   positiveInt,
@@ -95,7 +96,7 @@ const stockCorrectionSchema = z.object({
   productId: positiveInt("Le produit"),
   variantId: optionalPositiveInt("La variante"),
   storeId: positiveInt("Le magasin"),
-  quantity: nonNegativeNumber("La quantite"),
+  quantity: numberValue("La quantite"),
   reason: optionalString("La raison"),
 });
 
@@ -204,7 +205,7 @@ const productCategoryUpdateSchema = z.object({
 
 const initialStockSchema = z.object({
   storeId: positiveInt("Le point de vente"),
-  quantity: nonNegativeNumber("La quantite initiale"),
+  quantity: numberValue("La quantite initiale"),
 });
 
 const productVariantSchema = z.object({
@@ -215,7 +216,7 @@ const productVariantSchema = z.object({
   codeBarres: optionalString("Le code-barres variante"),
   prixAchat: nonNegativeNumber("Le prix d'achat variante").optional(),
   prixVente: nonNegativeNumber("Le prix de vente variante").optional(),
-  quantiteStock: nonNegativeNumber("Le stock variante").optional(),
+  quantiteStock: numberValue("Le stock variante").optional(),
   seuilMinimum: nonNegativeInt("Le seuil minimum variante").optional(),
   actif: optionalBoolean("Le statut actif variante"),
 });

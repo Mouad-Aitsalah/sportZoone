@@ -90,6 +90,8 @@ const coerceNumber = (fieldLabel) =>
     invalid_type_error: `${fieldLabel} doit etre un nombre valide.`,
   });
 
+const numberValue = (fieldLabel) => coerceNumber(fieldLabel);
+
 const nonNegativeNumber = (fieldLabel) =>
   coerceNumber(fieldLabel).min(0, `${fieldLabel} doit etre superieur ou egal a 0.`);
 
@@ -177,6 +179,7 @@ module.exports = {
   emailString,
   optionalEmailString,
   optionalPhoneString,
+  numberValue,
   positiveNumber,
   nonNegativeNumber,
   positiveInt,

@@ -795,6 +795,11 @@ a {
   font-size: 13px;
 }
 
+.stock-negative-value {
+  color: #b42318;
+  font-weight: 700;
+}
+
 .product-variant-summary {
   display: inline-flex;
   align-items: center;
@@ -865,6 +870,14 @@ a {
 
 .variant-subtable tbody tr:last-child td {
   border-bottom: none;
+}
+
+.variant-subtable tbody tr.variant-stock-row-warning {
+  background: rgba(245, 158, 11, 0.12);
+}
+
+.variant-subtable tbody tr.variant-stock-row-critical {
+  background: rgba(239, 68, 68, 0.12);
 }
 
 .status-badge,

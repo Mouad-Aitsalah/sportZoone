@@ -226,6 +226,45 @@ const resolveVariantNumber = (...values) => {
   return "";
 };
 
+const getStockPresentationMeta = (quantity, minimumThreshold = 0) => {
+  const normalizedQuantity = Number(quantity || 0);
+  const normalizedThreshold = Number(minimumThreshold || 0);
+
+  if (normalizedQuantity < 0) {
+    return {
+      label: "Stock negatif",
+      tone: "stock-critical",
+      valueClassName: "stock-negative-value",
+      rowClassName: "variant-stock-row-critical",
+    };
+  }
+
+  if (normalizedQuantity === 0) {
+    return {
+      label: "Rupture",
+      tone: "stock-critical",
+      valueClassName: "",
+      rowClassName: "variant-stock-row-critical",
+    };
+  }
+
+  if (normalizedQuantity <= normalizedThreshold) {
+    return {
+      label: "Stock faible",
+      tone: "stock-warning",
+      valueClassName: "",
+      rowClassName: "variant-stock-row-warning",
+    };
+  }
+
+  return {
+    label: "Disponible",
+    tone: "success",
+    valueClassName: "",
+    rowClassName: "",
+  };
+};
+
 const createVariantDraft = (variant = null, product = null) => ({
   id: variant?.id || null,
   taille: variant?.size || variant?.taille || "Unique",
@@ -564,7 +603,6 @@ function ProductFormFields({
                     id={`initial-stock-${primaryStore.id}`}
                     className="text-input"
                     type="number"
-                    min="0"
                     step="1"
                     value={initialStocksByStore[primaryStore.id] ?? ""}
                     onChange={(event) =>
@@ -1440,7 +1478,7 @@ function ProductsPage() {
         return "Chaque variante doit contenir un prix de vente valide.";
       }
 
-      if (variant.quantiteStock === "" || Number(variant.quantiteStock) < 0) {
+      if (variant.quantiteStock === "" || Number.isNaN(Number(variant.quantiteStock))) {
         return "Chaque variante doit contenir un stock valide.";
       }
     }
@@ -1741,33 +1779,49 @@ function ProductsPage() {
                               <th>Variante</th>
                               <th>Code-barres</th>
                               <th>Stock</th>
+                              <th>Statut</th>
                               <th>Qte vendue</th>
                               <th>CA</th>
                               <th>Tickets</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {variants.map((variant) => (
-                              <tr
-                                key={getVariantMatchKey(product.id, variant)}
-                                data-search-match={
-                                  matchedVariantKeys.has(
-                                    getVariantMatchKey(product.id, variant)
-                                  )
-                                    ? "true"
-                                    : "false"
-                                }
-                              >
-                                <td>
-                                  <strong>{getVariantTypeLabel(variant)}</strong>
-                                </td>
-                                <td>{variant.barcode || "-"}</td>
-                                <td>{formatQuantityValue(variant.stock)}</td>
-                                <td>{formatQuantityValue(variant.quantitySold)}</td>
-                                <td>{formatCurrencyDh(variant.revenue || 0)}</td>
-                                <td>{variant.ticketsCount || 0}</td>
-                              </tr>
-                            ))}
+                            {variants.map((variant) => {
+                              const stockMeta = getStockPresentationMeta(
+                                variant.stock,
+                                variant.minimumThreshold
+                              );
+
+                              return (
+                                <tr
+                                  key={getVariantMatchKey(product.id, variant)}
+                                  className={stockMeta.rowClassName}
+                                  data-search-match={
+                                    matchedVariantKeys.has(
+                                      getVariantMatchKey(product.id, variant)
+                                    )
+                                      ? "true"
+                                      : "false"
+                                  }
+                                >
+                                  <td>
+                                    <strong>{getVariantTypeLabel(variant)}</strong>
+                                  </td>
+                                  <td>{variant.barcode || "-"}</td>
+                                  <td>
+                                    <span className={stockMeta.valueClassName}>
+                                      {formatQuantityValue(variant.stock)}
+                                    </span>
+                                  </td>
+                                  <td>
+                                    <Badge tone={stockMeta.tone}>{stockMeta.label}</Badge>
+                                  </td>
+                                  <td>{formatQuantityValue(variant.quantitySold)}</td>
+                                  <td>{formatCurrencyDh(variant.revenue || 0)}</td>
+                                  <td>{variant.ticketsCount || 0}</td>
+                                </tr>
+                              );
+                            })}
                           </tbody>
                         </table>
                       </div>
@@ -2232,7 +2286,6 @@ function ProductsPage() {
                         <input
                           className="text-input variant-input"
                           type="number"
-                          min="0"
                           step="1"
                           value={variant.quantiteStock}
                           onChange={(event) =>

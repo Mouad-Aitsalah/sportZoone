@@ -1024,10 +1024,7 @@ function PosPage() {
 
           return {
             ...variant,
-            stock: Math.max(
-              0,
-              roundPosQuantity(Number(variant.stock ?? 0) + variantDelta)
-            ),
+            stock: roundPosQuantity(Number(variant.stock ?? 0) + variantDelta),
           };
         });
 
@@ -1038,7 +1035,7 @@ function PosPage() {
         return {
           ...product,
           variants: nextVariants,
-          stock: Math.max(0, roundPosQuantity(Number(product.stock ?? 0) + productDelta)),
+          stock: roundPosQuantity(Number(product.stock ?? 0) + productDelta),
         };
       });
 
@@ -1189,35 +1186,15 @@ function PosPage() {
     const currentQuantity = existingItem?.quantity || 0;
     const availableStock = cartItem.stock ?? existingItem?.stock ?? 0;
     const initialQuantity = 1;
+    const shouldWarnNegativeStock =
+      !refundMode &&
+      Number.isFinite(Number(availableStock)) &&
+      currentQuantity + initialQuantity > Number(availableStock);
 
     if (!product?.active) {
       setNotice({
         type: "warning",
         message: `${product?.name || "Ce produit"} est inactif et ne peut pas etre ajoute.`,
-      });
-      return false;
-    }
-
-    if (!refundMode && availableStock <= 0) {
-      setNotice({
-        type: "error",
-        message: `${cartItem.displayName} n'est plus disponible en stock.`,
-      });
-      return false;
-    }
-
-    if (!refundMode && !existingItem && initialQuantity > availableStock) {
-      setNotice({
-        type: "warning",
-        message: `Stock insuffisant pour ${cartItem.displayName}. Stock disponible: ${availableStock}.`,
-      });
-      return false;
-    }
-
-    if (!refundMode && currentQuantity >= availableStock) {
-      setNotice({
-        type: "warning",
-        message: `Stock insuffisant pour ${cartItem.displayName}. Stock disponible: ${availableStock}.`,
       });
       return false;
     }
@@ -1229,14 +1206,16 @@ function PosPage() {
     }
 
     setNotice({
-      type: "success",
-      message: refundMode
-        ? `${cartItem.displayName} ajoute au panier remboursement${
-            options.isOffline ? " depuis le cache hors ligne" : ""
-          }.`
-        : `${cartItem.displayName} ajoute au panier${
-            options.isOffline ? " depuis le cache hors ligne" : ""
-          }.`,
+      type: shouldWarnNegativeStock ? "warning" : "success",
+      message: shouldWarnNegativeStock
+        ? `Attention : stock insuffisant pour ${cartItem.displayName}, le stock passera en negatif.`
+        : refundMode
+          ? `${cartItem.displayName} ajoute au panier remboursement${
+              options.isOffline ? " depuis le cache hors ligne" : ""
+            }.`
+          : `${cartItem.displayName} ajoute au panier${
+              options.isOffline ? " depuis le cache hors ligne" : ""
+            }.`,
     });
     return true;
   };
@@ -1447,19 +1426,15 @@ function PosPage() {
       return;
     }
 
-    if (!refundMode) {
-      const availableStock = Number(item.stock ?? 0);
-
-      if (parsedQuantity > availableStock) {
-        setNotice({
-          type: "warning",
-          message: `Stock insuffisant pour ${item.displayName || item.name}. Stock disponible: ${availableStock}.`,
-        });
-        return;
-      }
+    updateQuantity(item.id, parsedQuantity);
+    if (!refundMode && parsedQuantity > Number(item.stock ?? 0)) {
+      setNotice({
+        type: "warning",
+        message: `Attention : stock insuffisant pour ${item.displayName || item.name}, le stock passera en negatif.`,
+      });
+      return;
     }
 
-    updateQuantity(item.id, parsedQuantity);
     setNotice({ type: "", message: "" });
   };
 
@@ -2065,17 +2040,19 @@ function PosPage() {
                           Number(item.quantity || 0) + POS_QUANTITY_STEP
                         );
 
+                        increaseQuantity(item.id);
+
                         if (!refundMode && nextQuantity > Number(item.stock ?? 0)) {
                           setNotice({
                             type: "warning",
-                            message: `Stock insuffisant pour ${
+                            message: `Attention : stock insuffisant pour ${
                               item.displayName || item.name
-                            }. Stock disponible: ${item.stock ?? 0}.`,
+                            }, le stock passera en negatif.`,
                           });
                           return;
                         }
 
-                        increaseQuantity(item.id);
+                        setNotice({ type: "", message: "" });
                       }}
                     >
                       +
@@ -2417,7 +2394,13 @@ function PosPage() {
                 <td title={variant.barcode || "-"}>
                   <span className="pos-variant-barcode-cell">{variant.barcode || "-"}</span>
                 </td>
-                <td>{variant.stock ?? 0}</td>
+                <td>
+                  <span className={Number(variant.stock ?? 0) < 0 ? "stock-negative-value" : ""}>
+                    {Number(variant.stock ?? 0) < 0
+                      ? `${variant.stock ?? 0} (Stock negatif)`
+                      : variant.stock ?? 0}
+                  </span>
+                </td>
                 <td>
                   <button
                     className="primary-button small-button"
