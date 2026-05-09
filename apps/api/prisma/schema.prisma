@@ -229,7 +229,7 @@ model Fournisseur {
 model Produit {
   id             Int             @id @default(autoincrement())
   organisationId String
-  codeBarres     String
+  codeBarres     String?
   nom            String
   categorie      String
   categorieId    Int

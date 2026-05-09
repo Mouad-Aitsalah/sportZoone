@@ -10,6 +10,10 @@ const DEFAULT_STORE_NAME = "Magasin principal";
 const DEFAULT_CASH_REGISTER_NAME = "Caisse 1";
 const DEFAULT_UNKNOWN_CUSTOMER_NAME = "Client inconnu";
 const GLOBAL_ORGANISATION_NAME = "SportZone Global";
+const EXTENDED_TRANSACTION_OPTIONS = {
+  maxWait: 20000,
+  timeout: 120000,
+};
 const DEFAULT_PRODUCT_CATEGORIES = [
   { code: "CREATINE", nom: "Creatine", nomComplet: "Creatine" },
   { code: "OLIGO_ELEMENT", nom: "Oligo-element", nomComplet: "Oligo-element" },
@@ -254,100 +258,103 @@ const createOrganisation = async (req, res) => {
     bcrypt.hash(cashierPassword.trim(), 10),
   ]);
 
-  const createdOrganisation = await prisma.$transaction(async (tx) => {
-    const organisation = await tx.organisation.create({
-      data: {
-        name: normalizedName,
-      },
-    });
+  const createdOrganisation = await prisma.$transaction(
+    async (tx) => {
+      const organisation = await tx.organisation.create({
+        data: {
+          name: normalizedName,
+        },
+      });
 
-    await createOrganisationDefaults(tx, organisation.id);
+      await createOrganisationDefaults(tx, organisation.id);
 
-    const store = await tx.pointDeVente.create({
-      data: {
-        organisationId: organisation.id,
-        nom: normalizedName,
-        adresse: `${normalizedName} - ${DEFAULT_STORE_NAME}`,
-      },
-    });
+      const store = await tx.pointDeVente.create({
+        data: {
+          organisationId: organisation.id,
+          nom: normalizedName,
+          adresse: `${normalizedName} - ${DEFAULT_STORE_NAME}`,
+        },
+      });
 
-    const cashRegister = await tx.caisse.create({
-      data: {
-        organisationId: organisation.id,
-        nom: DEFAULT_CASH_REGISTER_NAME,
-        code: `${buildOrganisationCode(normalizedName)}-CAISSE-1`,
-        pointDeVenteId: store.id,
-        estActive: true,
-      },
-    });
+      const cashRegister = await tx.caisse.create({
+        data: {
+          organisationId: organisation.id,
+          nom: DEFAULT_CASH_REGISTER_NAME,
+          code: `${buildOrganisationCode(normalizedName)}-CAISSE-1`,
+          pointDeVenteId: store.id,
+          estActive: true,
+        },
+      });
 
-    const admin = await tx.utilisateur.create({
-      data: {
-        organisationId: organisation.id,
-        nom: String(adminName).trim(),
-        email: normalizedAdminEmail,
-        motDePasse: hashedAdminPassword,
-        role: "ADMIN",
-        estActif: true,
-        approvalStatus: "APPROVED",
-      },
-    });
+      const admin = await tx.utilisateur.create({
+        data: {
+          organisationId: organisation.id,
+          nom: String(adminName).trim(),
+          email: normalizedAdminEmail,
+          motDePasse: hashedAdminPassword,
+          role: "ADMIN",
+          estActif: true,
+          approvalStatus: "APPROVED",
+        },
+      });
 
-    const cashier = await tx.utilisateur.create({
-      data: {
-        organisationId: organisation.id,
-        nom: String(cashierName).trim(),
-        email: normalizedCashierEmail,
-        motDePasse: hashedCashierPassword,
-        role: "EMPLOYE",
-        estActif: true,
-        approvalStatus: "APPROVED",
-        pointDeVenteId: store.id,
-        caisseId: cashRegister.id,
-      },
-    });
+      const cashier = await tx.utilisateur.create({
+        data: {
+          organisationId: organisation.id,
+          nom: String(cashierName).trim(),
+          email: normalizedCashierEmail,
+          motDePasse: hashedCashierPassword,
+          role: "EMPLOYE",
+          estActif: true,
+          approvalStatus: "APPROVED",
+          pointDeVenteId: store.id,
+          caisseId: cashRegister.id,
+        },
+      });
 
-    await tx.sessionCaisse.create({
-      data: {
-        organisationId: organisation.id,
-        numeroSession: "POS/1",
-        caisseId: cashRegister.id,
-        pointDeVenteId: store.id,
-        utilisateurId: cashier.id,
-        statut: "OUVERTE",
-        totalVentes: 0,
-        nombreTickets: 0,
-      },
-    });
+      await tx.sessionCaisse.create({
+        data: {
+          organisationId: organisation.id,
+          numeroSession: "POS/1",
+          caisseId: cashRegister.id,
+          pointDeVenteId: store.id,
+          utilisateurId: cashier.id,
+          statut: "OUVERTE",
+          totalVentes: 0,
+          nombreTickets: 0,
+        },
+      });
 
-    const defaultCustomer = await tx.client.create({
-      data: {
-        organisationId: organisation.id,
-        numeroClient: 1,
-        nom: DEFAULT_UNKNOWN_CUSTOMER_NAME,
-        credit: 0,
-        estActif: true,
-      },
-    });
+      const defaultCustomer = await tx.client.create({
+        data: {
+          organisationId: organisation.id,
+          numeroClient: 1,
+          nom: DEFAULT_UNKNOWN_CUSTOMER_NAME,
+          credit: 0,
+          estActif: true,
+        },
+      });
 
-    await tx.compte.create({
-      data: {
-        organisationId: organisation.id,
-        numeroCompte: "CL-0001",
-        type: "CLIENT",
-        nom: DEFAULT_UNKNOWN_CUSTOMER_NAME,
-        actif: true,
-        clientSourceId: defaultCustomer.id,
-      },
-    });
+      await tx.compte.create({
+        data: {
+          organisationId: organisation.id,
+          numeroCompte: "CL-0001",
+          type: "CLIENT",
+          nom: DEFAULT_UNKNOWN_CUSTOMER_NAME,
+          actif: true,
+          clientSourceId: defaultCustomer.id,
+        },
+      });
 
-    return tx.organisation.findUnique({
-      where: {
-        id: organisation.id,
-      },
-      select: organisationSelect,
-    });
-  });
+      return tx.organisation.findUnique({
+        where: {
+          id: organisation.id,
+        },
+        select: organisationSelect,
+      });
+    },
+    EXTENDED_TRANSACTION_OPTIONS
+  );
 
   return res.status(201).json({
     message: "Organisation creee avec succes.",
@@ -446,58 +453,61 @@ const updateOrganisation = async (req, res) => {
     }
   }
 
-  const updatedOrganisation = await prisma.$transaction(async (tx) => {
-    if (normalizedName) {
-      await tx.organisation.update({
+  const updatedOrganisation = await prisma.$transaction(
+    async (tx) => {
+      if (normalizedName) {
+        await tx.organisation.update({
+          where: {
+            id: organisationId,
+          },
+          data: {
+            name: normalizedName,
+          },
+        });
+      }
+
+      if (adminUser && (normalizedAdminName || normalizedAdminEmail || normalizedAdminPassword)) {
+        await tx.utilisateur.update({
+          where: {
+            id: adminUser.id,
+          },
+          data: {
+            ...(normalizedAdminName ? { nom: normalizedAdminName } : {}),
+            ...(normalizedAdminEmail ? { email: normalizedAdminEmail } : {}),
+            ...(normalizedAdminPassword
+              ? { motDePasse: await bcrypt.hash(normalizedAdminPassword, 10) }
+              : {}),
+          },
+        });
+      }
+
+      if (
+        cashierUser &&
+        (normalizedCashierName || normalizedCashierEmail || normalizedCashierPassword)
+      ) {
+        await tx.utilisateur.update({
+          where: {
+            id: cashierUser.id,
+          },
+          data: {
+            ...(normalizedCashierName ? { nom: normalizedCashierName } : {}),
+            ...(normalizedCashierEmail ? { email: normalizedCashierEmail } : {}),
+            ...(normalizedCashierPassword
+              ? { motDePasse: await bcrypt.hash(normalizedCashierPassword, 10) }
+              : {}),
+          },
+        });
+      }
+
+      return tx.organisation.findUnique({
         where: {
           id: organisationId,
         },
-        data: {
-          name: normalizedName,
-        },
+        select: organisationSelect,
       });
-    }
-
-    if (adminUser && (normalizedAdminName || normalizedAdminEmail || normalizedAdminPassword)) {
-      await tx.utilisateur.update({
-        where: {
-          id: adminUser.id,
-        },
-        data: {
-          ...(normalizedAdminName ? { nom: normalizedAdminName } : {}),
-          ...(normalizedAdminEmail ? { email: normalizedAdminEmail } : {}),
-          ...(normalizedAdminPassword
-            ? { motDePasse: await bcrypt.hash(normalizedAdminPassword, 10) }
-            : {}),
-        },
-      });
-    }
-
-    if (
-      cashierUser &&
-      (normalizedCashierName || normalizedCashierEmail || normalizedCashierPassword)
-    ) {
-      await tx.utilisateur.update({
-        where: {
-          id: cashierUser.id,
-        },
-        data: {
-          ...(normalizedCashierName ? { nom: normalizedCashierName } : {}),
-          ...(normalizedCashierEmail ? { email: normalizedCashierEmail } : {}),
-          ...(normalizedCashierPassword
-            ? { motDePasse: await bcrypt.hash(normalizedCashierPassword, 10) }
-            : {}),
-        },
-      });
-    }
-
-    return tx.organisation.findUnique({
-      where: {
-        id: organisationId,
-      },
-      select: organisationSelect,
-    });
-  });
+    },
+    EXTENDED_TRANSACTION_OPTIONS
+  );
 
   return res.status(200).json({
     message: "Organisation mise a jour avec succes.",
@@ -542,151 +552,155 @@ const deleteOrganisation = async (req, res) => {
     });
   }
 
-  await prisma.$transaction(async (tx) => {
-    await tx.venteLigne.deleteMany({
-      where: {
-        organisationId,
-      },
-    });
+  await prisma.$transaction(
+    async (tx) => {
+      // Timeout augmente pour grosses suppressions avec beaucoup de variantes.
+      await tx.venteLigne.deleteMany({
+        where: {
+          organisationId,
+        },
+      });
 
-    await tx.retour.deleteMany({
-      where: {
-        organisationId,
-      },
-    });
+      await tx.retour.deleteMany({
+        where: {
+          organisationId,
+        },
+      });
 
-    await tx.vente.deleteMany({
-      where: {
-        organisationId,
-      },
-    });
+      await tx.avoirLigne.deleteMany({
+        where: {
+          organisationId,
+        },
+      });
 
-    await tx.avoirLigne.deleteMany({
-      where: {
-        organisationId,
-      },
-    });
+      await tx.avoirFournisseurLigne.deleteMany({
+        where: {
+          organisationId,
+        },
+      });
 
-    await tx.avoir.deleteMany({
-      where: {
-        organisationId,
-      },
-    });
+      await tx.achatLigne.deleteMany({
+        where: {
+          organisationId,
+        },
+      });
 
-    await tx.avoirFournisseurLigne.deleteMany({
-      where: {
-        organisationId,
-      },
-    });
+      await tx.stockMovement.deleteMany({
+        where: {
+          organisationId,
+        },
+      });
 
-    await tx.avoirFournisseur.deleteMany({
-      where: {
-        organisationId,
-      },
-    });
+      await tx.stock.deleteMany({
+        where: {
+          organisationId,
+        },
+      });
 
-    await tx.achatLigne.deleteMany({
-      where: {
-        organisationId,
-      },
-    });
+      await tx.paiementClient.deleteMany({
+        where: {
+          organisationId,
+        },
+      });
 
-    await tx.achat.deleteMany({
-      where: {
-        organisationId,
-      },
-    });
+      await tx.loginApprovalRequest.deleteMany({
+        where: {
+          organisationId,
+        },
+      });
 
-    await tx.stockMovement.deleteMany({
-      where: {
-        organisationId,
-      },
-    });
+      await tx.vente.deleteMany({
+        where: {
+          organisationId,
+        },
+      });
 
-    await tx.stock.deleteMany({
-      where: {
-        organisationId,
-      },
-    });
+      await tx.avoir.deleteMany({
+        where: {
+          organisationId,
+        },
+      });
 
-    await tx.paiementClient.deleteMany({
-      where: {
-        organisationId,
-      },
-    });
+      await tx.avoirFournisseur.deleteMany({
+        where: {
+          organisationId,
+        },
+      });
 
-    await tx.loginApprovalRequest.deleteMany({
-      where: {
-        organisationId,
-      },
-    });
+      await tx.achat.deleteMany({
+        where: {
+          organisationId,
+        },
+      });
 
-    await tx.produitVariante.deleteMany({
-      where: {
-        organisationId,
-      },
-    });
+      await tx.produitVariante.deleteMany({
+        where: {
+          organisationId,
+        },
+      });
 
-    await tx.produit.deleteMany({
-      where: {
-        organisationId,
-      },
-    });
+      await tx.produit.deleteMany({
+        where: {
+          organisationId,
+        },
+      });
 
-    await tx.compte.deleteMany({
-      where: {
-        organisationId,
-      },
-    });
+      await tx.compte.deleteMany({
+        where: {
+          organisationId,
+        },
+      });
 
-    await tx.client.deleteMany({
-      where: {
-        organisationId,
-      },
-    });
+      await tx.client.deleteMany({
+        where: {
+          organisationId,
+        },
+      });
 
-    await tx.fournisseur.deleteMany({
-      where: {
-        organisationId,
-      },
-    });
+      await tx.fournisseur.deleteMany({
+        where: {
+          organisationId,
+        },
+      });
 
-    await tx.sessionCaisse.deleteMany({
-      where: {
-        organisationId,
-      },
-    });
+      await tx.sessionCaisse.deleteMany({
+        where: {
+          organisationId,
+        },
+      });
 
-    await tx.caisse.deleteMany({
-      where: {
-        organisationId,
-      },
-    });
+      await tx.caisse.deleteMany({
+        where: {
+          organisationId,
+        },
+      });
 
-    await tx.utilisateur.deleteMany({
-      where: {
-        organisationId,
-      },
-    });
+      await tx.utilisateur.deleteMany({
+        where: {
+          organisationId,
+        },
+      });
 
-    await tx.pointDeVente.deleteMany({
-      where: {
-        organisationId,
-      },
-    });
+      await tx.pointDeVente.deleteMany({
+        where: {
+          organisationId,
+        },
+      });
 
-    await tx.categorieProduit.deleteMany({
-      where: {
-        organisationId,
-      },
-    });
+      await tx.categorieProduit.deleteMany({
+        where: {
+          organisationId,
+        },
+      });
 
-    await tx.organisation.delete({
-      where: {
-        id: organisationId,
-      },
-    });
-  });
+      await tx.organisation.delete({
+        where: {
+          id: organisationId,
+        },
+      });
+    },
+    EXTENDED_TRANSACTION_OPTIONS
+  );
 
   return res.status(200).json({
     message: `Organisation ${organisation.name} supprimee avec succes.`,

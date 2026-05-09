@@ -5,6 +5,7 @@ import Modal from "../components/Modal";
 import PageHeader from "../components/PageHeader";
 import SectionCard from "../components/SectionCard";
 import SearchInput from "../components/SearchInput";
+import StatCard from "../components/StatCard";
 import api from "../services/api";
 import {
   cacheResources,
@@ -412,6 +413,63 @@ const buildProductPayload = (formData) => ({
   estActif: formData.estActif,
 });
 
+const formatCompactCount = (value) =>
+  new Intl.NumberFormat("fr-MA", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
+  }).format(Number(value || 0));
+
+const normalizeProductsCatalogResponse = (payload) => {
+  if (Array.isArray(payload)) {
+    return {
+      products: payload,
+      stats: null,
+    };
+  }
+
+  return {
+    products: getCollection(payload, ["products", "data"]),
+    stats: payload?.stats || null,
+  };
+};
+
+const buildProductsSummaryStats = (products = []) =>
+  products.reduce(
+    (stats, product) => {
+      const variants = getProductVariants(product);
+      const productStock = Number(product?.stock || 0);
+
+      stats.totalProducts += 1;
+      stats.totalVariants += variants.length;
+
+      if (!String(product?.barcode || "").trim()) {
+        stats.missingBarcodes += 1;
+      }
+
+      if (productStock < 0) {
+        stats.negativeStockCount += 1;
+      }
+
+      variants.forEach((variant) => {
+        if (!String(getVariantBarcodeValue(variant)).trim()) {
+          stats.missingBarcodes += 1;
+        }
+
+        if (Number(variant?.stock || 0) < 0) {
+          stats.negativeStockCount += 1;
+        }
+      });
+
+      return stats;
+    },
+    {
+      totalProducts: 0,
+      totalVariants: 0,
+      missingBarcodes: 0,
+      negativeStockCount: 0,
+    }
+  );
+
 function ProductFormFields({
   formData,
   onChange,
@@ -460,7 +518,7 @@ function ProductFormFields({
           name="codeBarres"
           value={formData.codeBarres}
           onChange={onChange}
-          placeholder="Laisser vide pour generation automatique"
+          placeholder="Optionnel"
         />
       </div>
 
@@ -627,6 +685,7 @@ function ProductFormFields({
 function ProductsPage() {
   const [searchTerm, setSearchTerm] = useState("");
   const [products, setProducts] = useState([]);
+  const [productsStats, setProductsStats] = useState(null);
   const [suppliers, setSuppliers] = useState([]);
   const [categories, setCategories] = useState([]);
   const [stores, setStores] = useState([]);
@@ -705,10 +764,13 @@ function ProductsPage() {
   };
 
   const fetchProducts = async () => {
-    const nextProducts = await refreshCachedResource(getProductsCatalogResource());
-    setProducts(nextProducts);
-    applyDerivedReferenceData(nextProducts);
-    return nextProducts;
+    const catalogPayload = await refreshCachedResource(getProductsCatalogResource());
+    const normalizedCatalog = normalizeProductsCatalogResponse(catalogPayload);
+
+    setProducts(normalizedCatalog.products);
+    setProductsStats(normalizedCatalog.stats);
+    applyDerivedReferenceData(normalizedCatalog.products);
+    return normalizedCatalog.products;
   };
 
   const fetchSuppliers = async () => {
@@ -752,9 +814,10 @@ function ProductsPage() {
             return;
           }
 
-          const nextProducts = Array.isArray(cachedProducts) ? cachedProducts : [];
-          setProducts(nextProducts);
-          applyDerivedReferenceData(nextProducts);
+          const normalizedCatalog = normalizeProductsCatalogResponse(cachedProducts);
+          setProducts(normalizedCatalog.products);
+          setProductsStats(normalizedCatalog.stats);
+          applyDerivedReferenceData(normalizedCatalog.products);
           setIsLoading(false);
         },
         onFreshData: (freshProducts) => {
@@ -762,9 +825,10 @@ function ProductsPage() {
             return;
           }
 
-          const nextProducts = Array.isArray(freshProducts) ? freshProducts : [];
-          setProducts(nextProducts);
-          applyDerivedReferenceData(nextProducts);
+          const normalizedCatalog = normalizeProductsCatalogResponse(freshProducts);
+          setProducts(normalizedCatalog.products);
+          setProductsStats(normalizedCatalog.stats);
+          applyDerivedReferenceData(normalizedCatalog.products);
         },
         onError: (error, cachedEntry) => {
           if (!isMounted || cachedEntry) {
@@ -843,6 +907,15 @@ function ProductsPage() {
 
   const filteredProducts = searchResults.filteredProducts;
   const matchedVariantKeysByProduct = searchResults.matchedVariantKeysByProduct;
+  const visibleProductsStats = useMemo(
+    () => buildProductsSummaryStats(filteredProducts),
+    [filteredProducts]
+  );
+  const globalProductsStats = useMemo(
+    () => productsStats || buildProductsSummaryStats(products),
+    [products, productsStats]
+  );
+  const isSearchActive = Boolean(normalizeSearchValue(searchTerm));
 
   const ensureSuppliersLoaded = async () => {
     if (!canManageProducts) {
@@ -1460,14 +1533,8 @@ function ProductsPage() {
     }
 
     for (const variant of productVariants) {
-      const normalizedVariantBarcode = String(variant.codeBarres || "").trim();
-
       if (!String(variant.taille || "").trim()) {
         return "Chaque variante doit contenir une taille.";
-      }
-
-      if (variant.id && !normalizedVariantBarcode) {
-        return "Chaque variante existante doit contenir un code-barres.";
       }
 
       if (variant.prixAchat === "" || Number(variant.prixAchat) < 0) {
@@ -1651,6 +1718,49 @@ function ProductsPage() {
         <div className={`inline-notice ${notice.type}`}>{notice.message}</div>
       ) : null}
 
+      <div className="card-grid">
+        <StatCard
+          label="Total produits"
+          value={formatCompactCount(globalProductsStats.totalProducts)}
+          detail={
+            isSearchActive
+              ? `${formatCompactCount(visibleProductsStats.totalProducts)} affiches`
+              : "Catalogue complet"
+          }
+          tone="info"
+        />
+        <StatCard
+          label="Total variantes"
+          value={formatCompactCount(globalProductsStats.totalVariants)}
+          detail={
+            isSearchActive
+              ? `${formatCompactCount(visibleProductsStats.totalVariants)} visibles`
+              : "Toutes variantes confondues"
+          }
+          tone="default"
+        />
+        <StatCard
+          label="Sans code-barres"
+          value={formatCompactCount(globalProductsStats.missingBarcodes)}
+          detail={
+            isSearchActive
+              ? `${formatCompactCount(visibleProductsStats.missingBarcodes)} visibles`
+              : "Produits et variantes"
+          }
+          tone="warning"
+        />
+        <StatCard
+          label="Stock negatif"
+          value={formatCompactCount(globalProductsStats.negativeStockCount)}
+          detail={
+            isSearchActive
+              ? `${formatCompactCount(visibleProductsStats.negativeStockCount)} visibles`
+              : "Produits et variantes"
+          }
+          tone="danger"
+        />
+      </div>
+
       <SectionCard
         title="Catalogue produits"
         description="Rechercher une reference par nom, categorie, code-barres ou texte de variante."
@@ -1729,7 +1839,7 @@ function ProductsPage() {
                       ) : null}
                     </div>
                   </td>
-                  <td>{product.barcode}</td>
+                  <td>{product.barcode || "-"}</td>
                   <td>{product.supplierName || "-"}</td>
                   <td>{product.category}</td>
                   <td>{formatCurrencyDh(product.purchasePrice || 0)}</td>
@@ -1911,7 +2021,7 @@ function ProductsPage() {
           ) : null}
 
           <div className="inline-notice info">
-            Les nouveaux codes-barres generes utilisent un vrai format EAN-13. Les anciens codes invalides restent exportables pour compatibilite.
+            Les produits sans code-barres sont ignores dans cet export. Les codes EAN-13 et les anciens codes restent exportables pour compatibilite.
           </div>
         </form>
       </Modal>
@@ -1920,7 +2030,7 @@ function ProductsPage() {
         isOpen={importModal.isOpen}
         eyebrow="Import produits"
         title="Importer produits"
-        description="Chargez un fichier Excel ou CSV avec une ligne par variante. Formats acceptes: ancien format `nom, codeBarres, categorie, prixAchat, prixVente, stock, taille, couleur` ou nouveau format `nom, codeBarres, categorie, cout, prixVente, quantiteDisponible, valeursVariante`. Si codeBarres est vide, un EAN-13 sera genere."
+        description="Chargez un fichier Excel ou CSV avec une ligne par variante. Formats acceptes: ancien format `nom, codeBarres, categorie, prixAchat, prixVente, stock, taille, couleur` ou nouveau format `nom, codeBarres, categorie, cout, prixVente, quantiteDisponible, valeursVariante`. Si codeBarres est vide, aucun code-barres ne sera genere."
         onClose={closeImportModal}
         actions={
           <>
@@ -2252,9 +2362,7 @@ function ProductsPage() {
                             handleVariantChange(index, "codeBarres", event.target.value)
                           }
                           placeholder={
-                            variant.id
-                              ? "Code-barres variante"
-                              : "Genere automatiquement si vide"
+                            variant.id ? "Code-barres variante" : "Optionnel"
                           }
                         />
                       </td>
@@ -2439,7 +2547,7 @@ function ProductsPage() {
           <div className="delete-product-summary">
             <p className="delete-product-name">{deleteModal.product.name}</p>
             <p className="delete-product-meta">
-              Code-barres: {deleteModal.product.barcode}
+              Code-barres: {deleteModal.product.barcode || "-"}
             </p>
           </div>
         ) : null}

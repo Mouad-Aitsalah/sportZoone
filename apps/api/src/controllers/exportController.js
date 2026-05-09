@@ -1373,14 +1373,18 @@ const exportProductBarcodesPdf = async (req, res) => {
   const items = [];
 
   for (const product of products) {
+    const productBarcode = normalizeRequiredString(product.codeBarres);
+
     if (mode === "all_products" || mode === "products_and_variants" || mode === "selected_product") {
-      items.push({
-        key: `product-${product.id}`,
-        name: product.nom,
-        subtitle: "Produit principal",
-        barcode: product.codeBarres,
-        isLegacyBarcode: !isValidEAN13(product.codeBarres),
-      });
+      if (productBarcode) {
+        items.push({
+          key: `product-${product.id}`,
+          name: product.nom,
+          subtitle: "Produit principal",
+          barcode: productBarcode,
+          isLegacyBarcode: !isValidEAN13(productBarcode),
+        });
+      }
     }
 
     if (mode === "variants_only" || mode === "products_and_variants" || mode === "selected_product") {

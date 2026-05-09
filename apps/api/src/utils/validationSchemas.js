@@ -222,7 +222,7 @@ const productVariantSchema = z.object({
 });
 
 const productCreateSchema = z.object({
-  codeBarres: requiredString("Le code-barres").optional(),
+  codeBarres: optionalString("Le code-barres"),
   nom: requiredString("Le nom du produit"),
   categorieId: positiveInt("La categorie"),
   categorie: optionalString("La categorie"),
@@ -250,7 +250,7 @@ const productCreateSchema = z.object({
 });
 
 const productUpdateSchema = z.object({
-  codeBarres: requiredString("Le code-barres").optional(),
+  codeBarres: optionalString("Le code-barres"),
   nom: requiredString("Le nom du produit").optional(),
   categorieId: optionalPositiveInt("La categorie"),
   categorie: optionalString("La categorie"),

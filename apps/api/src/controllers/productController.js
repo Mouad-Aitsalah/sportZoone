@@ -2,10 +2,6 @@ const path = require("path");
 const XLSX = require("xlsx");
 const prisma = require("../config/prisma");
 const { validateSchema } = require("../utils/validation");
-const {
-  buildGeneratedEAN13,
-  parseGeneratedEAN13Sequence,
-} = require("../utils/barcode");
 const { getOrganisationIdFromUser } = require("../utils/organisationScope");
 const {
   ensureDefaultSupplierCompte,
@@ -86,28 +82,6 @@ const buildImportCategoryCode = (name, usedCodes) => {
   }
 
   return candidate;
-};
-
-const getMaxGeneratedBarcodeSequence = (barcodes = []) =>
-  barcodes.reduce((maxSequence, barcode) => {
-    const sequence = parseGeneratedEAN13Sequence(barcode);
-    return sequence !== null && sequence > maxSequence ? sequence : maxSequence;
-  }, -1);
-
-const createEAN13Allocator = (usedBarcodes, initialSequence = 0) => {
-  let nextSequence = Math.max(0, Number(initialSequence) || 0);
-
-  return () => {
-    while (true) {
-      const candidate = buildGeneratedEAN13(nextSequence);
-      nextSequence += 1;
-
-      if (!usedBarcodes.has(candidate.toLowerCase())) {
-        usedBarcodes.add(candidate.toLowerCase());
-        return candidate;
-      }
-    }
-  };
 };
 
 const parseOptionalPositiveInteger = (value) => {
@@ -536,7 +510,6 @@ const buildVariantSignature = (size, color, valuesText = null) => {
 
 const normalizeVariantsInput = ({
   variants,
-  defaultBarcode,
   defaultPurchasePrice,
   defaultSalePrice,
   defaultThreshold,
@@ -610,13 +583,6 @@ const normalizeVariantsInput = ({
       throw {
         status: 400,
         message: "Le statut actif de chaque variante doit etre true ou false.",
-      };
-    }
-
-    if (parsedVariantId && !barcode) {
-      throw {
-        status: 400,
-        message: "Chaque variante existante doit contenir un code-barres.",
       };
     }
 
@@ -783,63 +749,6 @@ const loadUsedBarcodes = async (organisationId, excludeProductId = null) => {
       .map((entry) => normalizeRequiredString(entry.codeBarres).toLowerCase())
       .filter(Boolean)
   );
-};
-
-const generateNextProductBarcode = async (organisationId) => {
-  const usedBarcodes = await loadUsedBarcodes(organisationId);
-  const allocateEAN13 = createEAN13Allocator(
-    usedBarcodes,
-    getMaxGeneratedBarcodeSequence(Array.from(usedBarcodes)) + 1
-  );
-
-  return allocateEAN13();
-};
-
-const generateMissingVariantBarcodes = async ({
-  organisationId,
-  productBarcode = null,
-  variants,
-  excludeProductId = null,
-}) => {
-  const usedBarcodes = await loadUsedBarcodes(organisationId, excludeProductId);
-  const reservedBarcodes = new Set();
-  const normalizedProductBarcode = normalizeRequiredString(productBarcode);
-
-  if (normalizedProductBarcode) {
-    reservedBarcodes.add(normalizedProductBarcode.toLowerCase());
-  }
-
-  for (const variant of variants) {
-    const normalizedVariantBarcode = normalizeRequiredString(variant.codeBarres);
-
-    if (normalizedVariantBarcode) {
-      reservedBarcodes.add(normalizedVariantBarcode.toLowerCase());
-    }
-  }
-
-  const allocateEAN13 = createEAN13Allocator(
-    usedBarcodes,
-    getMaxGeneratedBarcodeSequence(Array.from(usedBarcodes)) + 1
-  );
-
-  return variants.map((variant) => {
-    if (variant.codeBarres) {
-      return variant;
-    }
-
-    let candidate = "";
-
-    do {
-      candidate = allocateEAN13();
-    } while (reservedBarcodes.has(candidate.toLowerCase()));
-
-    reservedBarcodes.add(candidate.toLowerCase());
-
-    return {
-      ...variant,
-      codeBarres: candidate,
-    };
-  });
 };
 
 const syncAggregateProductStock = async (
@@ -1039,24 +948,17 @@ const createProduct = async (req, res) => {
     if (normalizedCodeBarres) {
       await ensureUniqueProductBarcode(organisationId, normalizedCodeBarres);
     } else {
-      normalizedCodeBarres = await generateNextProductBarcode(organisationId);
+      normalizedCodeBarres = null;
     }
 
     const normalizedVariants = normalizeVariantsInput({
       variants,
-      defaultBarcode: normalizedCodeBarres,
       defaultPurchasePrice: parsedPrixAchat,
       defaultSalePrice: parsedPrixDetail,
       defaultThreshold: parsedSeuilMinimum,
       initialQuantity: totalInitialQuantity,
     });
-    const variantsWithBarcodes = await generateMissingVariantBarcodes({
-      organisationId,
-      productBarcode: normalizedCodeBarres,
-      variants: normalizedVariants,
-    });
-
-    await ensureUniqueVariantBarcodes(organisationId, variantsWithBarcodes);
+    await ensureUniqueVariantBarcodes(organisationId, normalizedVariants);
 
     if (parsedFournisseurId) {
       try {
@@ -1139,7 +1041,7 @@ const createProduct = async (req, res) => {
       });
 
       await tx.produitVariante.createMany({
-        data: variantsWithBarcodes.map((variant) => ({
+        data: normalizedVariants.map((variant) => ({
           organisationId,
           produitId: produitCree.id,
           taille: variant.taille,
@@ -1154,7 +1056,7 @@ const createProduct = async (req, res) => {
         })),
       });
 
-      const totalVariantStock = variantsWithBarcodes.reduce(
+      const totalVariantStock = normalizedVariants.reduce(
         (sum, variant) => sum + Number(variant.quantiteStock || 0),
         0
       );
@@ -1258,14 +1160,7 @@ const updateProduct = async (req, res) => {
 
     if (codeBarres !== undefined) {
       const normalizedCodeBarres = normalizeRequiredString(codeBarres);
-
-      if (!normalizedCodeBarres) {
-        return res.status(400).json({
-          message: "codeBarres ne peut pas etre vide.",
-        });
-      }
-
-      data.codeBarres = normalizedCodeBarres;
+      data.codeBarres = normalizedCodeBarres || null;
     }
 
     if (nom !== undefined) {
@@ -1412,15 +1307,19 @@ const updateProduct = async (req, res) => {
       }
     }
 
-    const nextBarcode = data.codeBarres || existingProduct.codeBarres;
-    await ensureUniqueProductBarcode(organisationId, nextBarcode, productId);
+    const nextBarcode = Object.prototype.hasOwnProperty.call(data, "codeBarres")
+      ? data.codeBarres
+      : existingProduct.codeBarres;
+
+    if (nextBarcode) {
+      await ensureUniqueProductBarcode(organisationId, nextBarcode, productId);
+    }
 
     const nextVariantsInput =
       variants === undefined
         ? null
         : normalizeVariantsInput({
             variants,
-            defaultBarcode: nextBarcode,
             defaultPurchasePrice:
               data.prixAchat !== undefined
                 ? data.prixAchat
@@ -1438,15 +1337,7 @@ const updateProduct = async (req, res) => {
               0
             ),
           });
-    const nextVariants =
-      nextVariantsInput === null
-        ? null
-        : await generateMissingVariantBarcodes({
-            organisationId,
-            productBarcode: nextBarcode,
-            variants: nextVariantsInput,
-            excludeProductId: productId,
-          });
+    const nextVariants = nextVariantsInput;
 
     if (nextVariants) {
       await ensureUniqueVariantBarcodes(organisationId, nextVariants, productId);
@@ -1713,10 +1604,6 @@ const importProducts = async (req, res) => {
     );
     const usedBarcodes = await loadUsedBarcodes(organisationId);
     const touchedProductIds = new Set();
-    const allocateGeneratedBarcode = createEAN13Allocator(
-      usedBarcodes,
-      getMaxGeneratedBarcodeSequence(Array.from(usedBarcodes)) + 1
-    );
     let importedProducts = 0;
     let importedVariants = 0;
     const errors = [];
@@ -1735,14 +1622,10 @@ const importProducts = async (req, res) => {
           };
         }
 
-        if (!variantBarcode) {
-          variantBarcode = allocateGeneratedBarcode();
-        }
-
         const existingProduct = productsByName.get(row.nomKey) || null;
         const nextParentBarcode = existingProduct
           ? existingProduct.codeBarres
-          : allocateGeneratedBarcode();
+          : null;
 
         const result = await prisma.$transaction(async (tx) => {
           let product = existingProduct;
@@ -1799,38 +1682,40 @@ const importProducts = async (req, res) => {
             };
           }
 
-          const conflictingProduct = await tx.produit.findFirst({
-            where: {
-              organisationId,
-              codeBarres: variantBarcode,
-            },
-            select: {
-              id: true,
-            },
-          });
+          if (variantBarcode) {
+            const conflictingProduct = await tx.produit.findFirst({
+              where: {
+                organisationId,
+                codeBarres: variantBarcode,
+              },
+              select: {
+                id: true,
+              },
+            });
 
-          if (conflictingProduct) {
-            throw {
-              status: 409,
-              message: VARIANT_BARCODE_CONFLICT_MESSAGE,
-            };
-          }
+            if (conflictingProduct) {
+              throw {
+                status: 409,
+                message: VARIANT_BARCODE_CONFLICT_MESSAGE,
+              };
+            }
 
-          const conflictingVariant = await tx.produitVariante.findFirst({
-            where: {
-              organisationId,
-              codeBarres: variantBarcode,
-            },
-            select: {
-              id: true,
-            },
-          });
+            const conflictingVariant = await tx.produitVariante.findFirst({
+              where: {
+                organisationId,
+                codeBarres: variantBarcode,
+              },
+              select: {
+                id: true,
+              },
+            });
 
-          if (conflictingVariant) {
-            throw {
-              status: 409,
-              message: VARIANT_BARCODE_CONFLICT_MESSAGE,
-            };
+            if (conflictingVariant) {
+              throw {
+                status: 409,
+                message: VARIANT_BARCODE_CONFLICT_MESSAGE,
+              };
+            }
           }
 
           const createdVariant = await tx.produitVariante.create({
@@ -1895,7 +1780,10 @@ const importProducts = async (req, res) => {
         if (result.createdProduct) {
           importedProducts += 1;
           productsByName.set(row.nomKey, result.product);
-          usedBarcodes.add(String(result.product.codeBarres || "").toLowerCase());
+
+          if (result.product.codeBarres) {
+            usedBarcodes.add(String(result.product.codeBarres).toLowerCase());
+          }
 
           if (result.category) {
             categoriesByName.set(row.categorieKey, result.category);
@@ -1904,7 +1792,9 @@ const importProducts = async (req, res) => {
         }
 
         importedVariants += 1;
-        usedBarcodes.add(variantBarcode.toLowerCase());
+        if (variantBarcode) {
+          usedBarcodes.add(variantBarcode.toLowerCase());
+        }
         touchedProductIds.add(result.product.id);
         if (!variantSignaturesByProductId.has(result.product.id)) {
           variantSignaturesByProductId.set(result.product.id, new Set());

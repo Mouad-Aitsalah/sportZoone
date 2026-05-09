@@ -91,7 +91,10 @@ export const cacheResources = {
           },
         });
 
-        return normalizeProducts(response.data);
+        return {
+          products: normalizeProducts(response.data),
+          stats: response.data?.stats || null,
+        };
       },
     }),
   stores: () =>

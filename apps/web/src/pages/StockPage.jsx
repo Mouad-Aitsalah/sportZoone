@@ -6,6 +6,7 @@ import Modal from "../components/Modal";
 import PageHeader from "../components/PageHeader";
 import SearchInput from "../components/SearchInput";
 import SectionCard from "../components/SectionCard";
+import StatCard from "../components/StatCard";
 import { getCurrentUser, isAdminRole } from "../store/authStore";
 import {
   CACHE_KEYS,
@@ -39,10 +40,59 @@ const STOCK_QUERY_PARAMS = {
 };
 const STOCK_CACHE_KEY = CACHE_KEYS.stock("inventory");
 
+const formatCompactCount = (value) =>
+  new Intl.NumberFormat("fr-MA", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
+  }).format(Number(value || 0));
+
+const normalizeStocksPayload = (payload) => {
+  if (Array.isArray(payload)) {
+    return {
+      rows: payload,
+      stats: null,
+    };
+  }
+
+  return {
+    rows: Array.isArray(payload?.data) ? payload.data : [],
+    stats: payload?.stats || null,
+  };
+};
+
+const buildStockSummaryStats = (rows = []) =>
+  rows.reduce(
+    (stats, row) => {
+      const quantity = Number(row.quantity || 0);
+      const purchasePrice = Number(row.purchasePrice || 0);
+
+      stats.totalStockRows += 1;
+
+      if (quantity > 0) {
+        stats.availableCount += 1;
+      } else if (quantity === 0) {
+        stats.outOfStockCount += 1;
+      } else {
+        stats.negativeStockCount += 1;
+      }
+
+      stats.stockValue += purchasePrice * quantity;
+      return stats;
+    },
+    {
+      totalStockRows: 0,
+      availableCount: 0,
+      outOfStockCount: 0,
+      negativeStockCount: 0,
+      stockValue: 0,
+    }
+  );
+
 function StockPage() {
   const [searchTerm, setSearchTerm] = useState("");
   const [purchaseValueSort, setPurchaseValueSort] = useState("default");
   const [stocks, setStocks] = useState([]);
+  const [stockStats, setStockStats] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
@@ -55,10 +105,12 @@ function StockPage() {
   const canViewFinancialStock = canManageStock;
   const fetchStocks = async () => {
     const response = await api.get("/stocks", STOCK_QUERY_PARAMS);
-    const nextStocks = Array.isArray(response.data) ? response.data : response.data?.data || [];
-    setStocks(nextStocks);
-    writeCache(STOCK_CACHE_KEY, nextStocks);
-    return nextStocks;
+    const normalizedPayload = normalizeStocksPayload(response.data);
+
+    setStocks(normalizedPayload.rows);
+    setStockStats(normalizedPayload.stats);
+    writeCache(STOCK_CACHE_KEY, normalizedPayload);
+    return normalizedPayload.rows;
   };
 
   useEffect(() => {
@@ -74,7 +126,9 @@ function StockPage() {
       const stocksCache = readCache(STOCK_CACHE_KEY, CACHE_TTL_MS);
 
       if (stocksCache && isMounted) {
-        setStocks(Array.isArray(stocksCache.data) ? stocksCache.data : []);
+        const normalizedCache = normalizeStocksPayload(stocksCache.data);
+        setStocks(normalizedCache.rows);
+        setStockStats(normalizedCache.stats);
       }
 
       try {
@@ -83,13 +137,12 @@ function StockPage() {
         setErrorMessage("");
 
         const stocksResponse = await api.get("/stocks", STOCK_QUERY_PARAMS);
-        const nextStocks = Array.isArray(stocksResponse.data)
-          ? stocksResponse.data
-          : stocksResponse.data?.data || [];
+        const normalizedPayload = normalizeStocksPayload(stocksResponse.data);
 
         if (isMounted) {
-          setStocks(nextStocks);
-          writeCache(STOCK_CACHE_KEY, nextStocks);
+          setStocks(normalizedPayload.rows);
+          setStockStats(normalizedPayload.stats);
+          writeCache(STOCK_CACHE_KEY, normalizedPayload);
         }
       } catch (error) {
         if (isMounted && !stocksCache) {
@@ -154,6 +207,15 @@ function StockPage() {
       }, 0),
     [filteredStocks]
   );
+  const visibleStockStats = useMemo(
+    () => buildStockSummaryStats(filteredStocks),
+    [filteredStocks]
+  );
+  const globalStockStats = useMemo(
+    () => stockStats || buildStockSummaryStats(stocks),
+    [stockStats, stocks]
+  );
+  const isSearchActive = Boolean(searchTerm.trim());
 
   const openStockModal = (mode, stock) => {
     setNotice({ type: "", message: "" });
@@ -304,17 +366,73 @@ function StockPage() {
         <div className={`inline-notice ${notice.type}`}>{notice.message}</div>
       ) : null}
 
+      <div className="card-grid">
+        <StatCard
+          label="Total lignes"
+          value={formatCompactCount(globalStockStats.totalStockRows)}
+          detail={
+            isSearchActive
+              ? `${formatCompactCount(visibleStockStats.totalStockRows)} visibles`
+              : "Toutes lignes confondues"
+          }
+          tone="info"
+        />
+        <StatCard
+          label="Stock disponible"
+          value={formatCompactCount(globalStockStats.availableCount)}
+          detail={
+            isSearchActive
+              ? `${formatCompactCount(visibleStockStats.availableCount)} visibles`
+              : "Quantite strictement positive"
+          }
+          tone="success"
+        />
+        <StatCard
+          label="Ruptures"
+          value={formatCompactCount(globalStockStats.outOfStockCount)}
+          detail={
+            isSearchActive
+              ? `${formatCompactCount(visibleStockStats.outOfStockCount)} visibles`
+              : "Quantite egale a 0"
+          }
+          tone="danger"
+        />
+        <StatCard
+          label={canViewFinancialStock ? "Valeur totale" : "Stock negatif"}
+          value={
+            canViewFinancialStock
+              ? formatCurrencyDh(globalStockStats.stockValue)
+              : formatCompactCount(globalStockStats.negativeStockCount)
+          }
+          detail={
+            canViewFinancialStock
+              ? isSearchActive
+                ? `${formatCurrencyDh(totalStockPurchaseValue)} visible`
+                : "Base prix d'achat"
+              : isSearchActive
+              ? `${formatCompactCount(visibleStockStats.negativeStockCount)} visibles`
+              : "Quantite inferieure a 0"
+          }
+          tone={canViewFinancialStock ? "default" : "danger"}
+        />
+        {canViewFinancialStock ? (
+          <StatCard
+            label="Stock negatif"
+            value={formatCompactCount(globalStockStats.negativeStockCount)}
+            detail={
+              isSearchActive
+                ? `${formatCompactCount(visibleStockStats.negativeStockCount)} visibles`
+                : "Quantite inferieure a 0"
+            }
+            tone="danger"
+          />
+        ) : null}
+      </div>
+
       <SectionCard
         title="Etat du stock"
         description="Suivi des quantites, seuils minimums et actions de correction du magasin SportZone."
       >
-        {canViewFinancialStock ? (
-          <div className="details-summary">
-            <span>Valeur totale du stock</span>
-            <strong>{formatCurrencyDh(totalStockPurchaseValue)}</strong>
-          </div>
-        ) : null}
-
         <div className="filter-row">
           <SearchInput
             value={searchTerm}
@@ -396,7 +514,7 @@ function StockPage() {
                 <td>{item.variantLabel || "-"}</td>
                 <td>{item.variantSize || "Unique"}</td>
                 <td>{item.variantColor || "-"}</td>
-                <td>{item.barcode}</td>
+                <td>{item.barcode || "-"}</td>
                 <td>
                   <span className={isNegativeStock ? "stock-negative-value" : ""}>
                     {item.quantity}
@@ -488,7 +606,7 @@ function StockPage() {
             </div>
             <div className="detail-stat">
               <span>Code-barres</span>
-              <strong>{stockModal.stock.barcode}</strong>
+              <strong>{stockModal.stock.barcode || "-"}</strong>
             </div>
             <div className="detail-stat">
               <span>Variante</span>

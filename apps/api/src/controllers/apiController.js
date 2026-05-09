@@ -148,6 +148,94 @@ const buildPaginatedResponse = ({ data, page, limit, total }) => ({
         },
 });
 
+const buildProductsStats = async (organisationId) => {
+  const [
+    totalProducts,
+    totalVariants,
+    missingProductBarcodes,
+    missingVariantBarcodes,
+    negativeVariants,
+    negativeProductGroups,
+  ] = await Promise.all([
+    prisma.produit.count({
+      where: {
+        organisationId,
+      },
+    }),
+    prisma.produitVariante.count({
+      where: {
+        organisationId,
+      },
+    }),
+    prisma.produit.count({
+      where: {
+        organisationId,
+        codeBarres: "",
+      },
+    }),
+    prisma.produitVariante.count({
+      where: {
+        organisationId,
+        OR: [{ codeBarres: null }, { codeBarres: "" }],
+      },
+    }),
+    prisma.produitVariante.count({
+      where: {
+        organisationId,
+        quantiteStock: {
+          lt: 0,
+        },
+      },
+    }),
+    prisma.produitVariante.groupBy({
+      by: ["produitId"],
+      where: {
+        organisationId,
+      },
+      _sum: {
+        quantiteStock: true,
+      },
+    }),
+  ]);
+
+  return {
+    totalProducts,
+    totalVariants,
+    missingBarcodes: missingProductBarcodes + missingVariantBarcodes,
+    negativeStockCount:
+      negativeVariants +
+      negativeProductGroups.filter((entry) => Number(entry._sum.quantiteStock || 0) < 0).length,
+  };
+};
+
+const buildStockStatsFromRows = (rows = []) =>
+  rows.reduce(
+    (stats, row) => {
+      const quantity = Number(row.quantity || 0);
+      const purchasePrice = Number(row.purchasePrice || 0);
+
+      stats.totalStockRows += 1;
+
+      if (quantity > 0) {
+        stats.availableCount += 1;
+      } else if (quantity === 0) {
+        stats.outOfStockCount += 1;
+      } else {
+        stats.negativeStockCount += 1;
+      }
+
+      stats.stockValue += purchasePrice * quantity;
+      return stats;
+    },
+    {
+      totalStockRows: 0,
+      availableCount: 0,
+      outOfStockCount: 0,
+      negativeStockCount: 0,
+      stockValue: 0,
+    }
+  );
+
 const logControllerDuration = (route, startedAt, metadata = {}) => {
   console.info(`[perf] ${route}`, {
     durationMs: Date.now() - startedAt,
@@ -1568,7 +1656,7 @@ const getProducts = async (req, res) => {
     },
   };
   try {
-    const [total, products] = await Promise.all([
+    const [total, products, stats] = await Promise.all([
       includePagination
         ? prisma.produit.count({
             where: {
@@ -1587,6 +1675,7 @@ const getProducts = async (req, res) => {
         skip,
         take: limit,
       }),
+      buildProductsStats(organisationId),
     ]);
 
     const productIds = products.map((product) => product.id);
@@ -1653,16 +1742,17 @@ const getProducts = async (req, res) => {
       }
     }
 
-    return res.status(200).json(
-      buildPaginatedResponse({
+    return res.status(200).json({
+      ...buildPaginatedResponse({
         data: products.map((product) =>
           toApiProduct(product, salesStatsByProductId.get(product.id))
         ),
         page,
         limit,
         total,
-      })
-    );
+      }),
+      stats,
+    });
   } finally {
     console.timeEnd(timerLabel);
     logControllerDuration("GET /api/products", startedAt, {
@@ -1996,15 +2086,17 @@ const getStocks = async (req, res) => {
 
   const total = allStockRows.length;
   const stocks = allStockRows.slice(skip, skip + limit);
+  const stats = buildStockStatsFromRows(allStockRows);
 
-  return res.status(200).json(
-    buildPaginatedResponse({
+  return res.status(200).json({
+    ...buildPaginatedResponse({
       data: stocks,
       page,
       limit,
       total,
-    })
-  );
+    }),
+    stats,
+  });
 };
 
 const getStockAlerts = async (req, res) => {
