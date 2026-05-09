@@ -610,6 +610,300 @@ const buildAnalyticsBuckets = (period, startDate, endDate) => {
   return buckets;
 };
 
+const SLOW_MOVING_WINDOW_DAYS = 30;
+const SLOW_MOVING_MAX_QUANTITY_SOLD = 2;
+const SLOW_MOVING_LIMIT = 15;
+
+const getSlowMovingStatus = (quantitySold30Days) =>
+  Number(quantitySold30Days || 0) <= 0
+    ? "Jamais vendu recemment"
+    : "Tres faible rotation";
+
+const getSlowMovingSeverity = (quantitySold30Days) =>
+  Number(quantitySold30Days || 0) <= 0 ? "critical" : "warning";
+
+const buildSlowMovingProducts = async ({ organisationId, pointDeVenteId = null }) => {
+  const salesWindowStart = getStartOfDay(new Date());
+  salesWindowStart.setDate(salesWindowStart.getDate() - (SLOW_MOVING_WINDOW_DAYS - 1));
+
+  const stockedProducts = await prisma.produit.findMany({
+    where: {
+      organisationId,
+      estActif: true,
+      OR: [
+        {
+          variantes: {
+            some: {
+              organisationId,
+              actif: true,
+              quantiteStock: {
+                gt: 0,
+              },
+            },
+          },
+        },
+        {
+          stocks: {
+            some: {
+              organisationId,
+              ...(pointDeVenteId ? { pointDeVenteId } : {}),
+              quantite: {
+                gt: 0,
+              },
+            },
+          },
+        },
+      ],
+    },
+    select: {
+      id: true,
+      nom: true,
+      codeBarres: true,
+      variantes: {
+        where: {
+          organisationId,
+          actif: true,
+          quantiteStock: {
+            gt: 0,
+          },
+        },
+        select: {
+          id: true,
+          taille: true,
+          couleur: true,
+          valeursVariante: true,
+          codeBarres: true,
+          quantiteStock: true,
+        },
+        orderBy: [{ id: "asc" }],
+      },
+      stocks: {
+        where: {
+          organisationId,
+          ...(pointDeVenteId ? { pointDeVenteId } : {}),
+          quantite: {
+            gt: 0,
+          },
+        },
+        select: {
+          quantite: true,
+        },
+      },
+    },
+    orderBy: [{ nom: "asc" }, { id: "asc" }],
+  });
+
+  if (!stockedProducts.length) {
+    return [];
+  }
+
+  const stockedItems = [];
+  const productIds = [];
+
+  for (const product of stockedProducts) {
+    productIds.push(product.id);
+
+    if (Array.isArray(product.variantes) && product.variantes.length > 0) {
+      for (const variant of product.variantes) {
+        stockedItems.push({
+          productId: product.id,
+          variantId: variant.id,
+          productName: product.nom,
+          variantName: getVariantValuesText(variant) || getVariantLabel(variant) || null,
+          stock: Number(variant.quantiteStock || 0),
+        });
+      }
+
+      continue;
+    }
+
+    const productStock = (product.stocks || []).reduce(
+      (sum, stock) => sum + Number(stock.quantite || 0),
+      0
+    );
+
+    if (productStock > 0) {
+      stockedItems.push({
+        productId: product.id,
+        variantId: null,
+        productName: product.nom,
+        variantName: null,
+        stock: productStock,
+      });
+    }
+  }
+
+  if (!stockedItems.length) {
+    return [];
+  }
+
+  const recentSaleLines = await prisma.venteLigne.findMany({
+    where: {
+      organisationId,
+      produitId: {
+        in: productIds,
+      },
+      vente: {
+        organisationId,
+        status: "completed",
+        total: {
+          gt: 0,
+        },
+        ...(pointDeVenteId ? { pointDeVenteId } : {}),
+        createdAt: {
+          gte: salesWindowStart,
+        },
+      },
+    },
+    select: {
+      produitId: true,
+      varianteId: true,
+      quantite: true,
+    },
+  });
+
+  const quantitySoldByItemKey = new Map();
+
+  for (const line of recentSaleLines) {
+    const itemKey = buildProductVariantKey(line.produitId, line.varianteId || null);
+    quantitySoldByItemKey.set(
+      itemKey,
+      (quantitySoldByItemKey.get(itemKey) || 0) + Math.abs(Number(line.quantite || 0))
+    );
+  }
+
+  const slowMovingCandidates = stockedItems
+    .map((item) => {
+      const itemKey = buildProductVariantKey(item.productId, item.variantId);
+      const quantitySold30Days = quantitySoldByItemKey.get(itemKey) || 0;
+
+      return {
+        ...item,
+        quantitySold30Days,
+        status: getSlowMovingStatus(quantitySold30Days),
+        severity: getSlowMovingSeverity(quantitySold30Days),
+      };
+    })
+    .filter(
+      (item) => item.stock > 0 && Number(item.quantitySold30Days || 0) <= SLOW_MOVING_MAX_QUANTITY_SOLD
+    )
+    .sort((left, right) => {
+      if (left.quantitySold30Days !== right.quantitySold30Days) {
+        return left.quantitySold30Days - right.quantitySold30Days;
+      }
+
+      if (right.stock !== left.stock) {
+        return right.stock - left.stock;
+      }
+
+      const productNameComparison = String(left.productName || "").localeCompare(
+        String(right.productName || ""),
+        "fr"
+      );
+
+      if (productNameComparison !== 0) {
+        return productNameComparison;
+      }
+
+      return String(left.variantName || "").localeCompare(String(right.variantName || ""), "fr");
+    })
+    .slice(0, SLOW_MOVING_LIMIT);
+
+  if (!slowMovingCandidates.length) {
+    return [];
+  }
+
+  const variantIds = slowMovingCandidates
+    .map((item) => item.variantId)
+    .filter((variantId) => Number.isInteger(variantId));
+  const productOnlyIds = slowMovingCandidates
+    .filter((item) => !item.variantId)
+    .map((item) => item.productId);
+  const latestSaleConditions = [
+    variantIds.length
+      ? {
+          varianteId: {
+            in: variantIds,
+          },
+        }
+      : null,
+    productOnlyIds.length
+      ? {
+          produitId: {
+            in: productOnlyIds,
+          },
+          varianteId: null,
+        }
+      : null,
+  ].filter(Boolean);
+
+  let lastSaleDateByItemKey = new Map();
+
+  if (latestSaleConditions.length > 0) {
+    const latestSaleLines = await prisma.venteLigne.findMany({
+      where: {
+        organisationId,
+        OR: latestSaleConditions,
+        vente: {
+          organisationId,
+          status: "completed",
+          total: {
+            gt: 0,
+          },
+          ...(pointDeVenteId ? { pointDeVenteId } : {}),
+        },
+      },
+      select: {
+        produitId: true,
+        varianteId: true,
+        createdAt: true,
+        vente: {
+          select: {
+            createdAt: true,
+            dateVente: true,
+          },
+        },
+      },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    });
+
+    const expectedItemKeys = new Set(
+      slowMovingCandidates.map((item) => buildProductVariantKey(item.productId, item.variantId))
+    );
+
+    lastSaleDateByItemKey = latestSaleLines.reduce((map, line) => {
+      const itemKey = buildProductVariantKey(line.produitId, line.varianteId || null);
+
+      if (!expectedItemKeys.has(itemKey) || map.has(itemKey)) {
+        return map;
+      }
+
+      map.set(
+        itemKey,
+        line.vente?.dateVente || line.vente?.createdAt || line.createdAt || null
+      );
+      return map;
+    }, new Map());
+  }
+
+  return slowMovingCandidates.map((item) => {
+    const itemKey = buildProductVariantKey(item.productId, item.variantId);
+
+    return {
+      productId: item.productId,
+      variantId: item.variantId,
+      productName: item.productName,
+      variantName: item.variantName,
+      stock: item.stock,
+      quantitySold30Days: item.quantitySold30Days,
+      lastSaleDate: lastSaleDateByItemKey.get(itemKey) || null,
+      status: item.status,
+      severity: item.severity,
+      salesWindowDays: SLOW_MOVING_WINDOW_DAYS,
+    };
+  });
+};
+
 const getEmployeeStoreId = (user) => {
   if (user.role !== "EMPLOYE") {
     return null;
@@ -4155,7 +4449,15 @@ const getAnalytics = async (req, res) => {
     throw createHttpError(400, "period must be one of: week, month.");
   }
 
-  const [stores, sales] = await Promise.all([
+  const [organisation, stores, sales, slowMovingProducts] = await Promise.all([
+    prisma.organisation.findUnique({
+      where: {
+        id: organisationId,
+      },
+      select: {
+        name: true,
+      },
+    }),
     prisma.pointDeVente.findMany({
       where: {
         organisationId,
@@ -4211,6 +4513,10 @@ const getAnalytics = async (req, res) => {
       orderBy: {
         createdAt: "asc",
       },
+    }),
+    buildSlowMovingProducts({
+      organisationId,
+      pointDeVenteId: primaryStore?.id || null,
     }),
   ]);
 
@@ -4330,6 +4636,8 @@ const getAnalytics = async (req, res) => {
 
   return res.status(200).json({
     period,
+    organisationName:
+      req.user?.organisationName || organisation?.name || null,
     hasSales,
     revenue: decimalToNumber(totalRevenue),
     salesCount: sales.length,
@@ -4347,6 +4655,7 @@ const getAnalytics = async (req, res) => {
     salesByStore,
     topProducts,
     salesDistribution,
+    slowMovingProducts,
   });
 };
 

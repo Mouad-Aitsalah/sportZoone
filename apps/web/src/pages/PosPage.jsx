@@ -1944,36 +1944,63 @@ function PosPage() {
             </button>
           </form>
 
-          <div className="product-hint-list">
+          <div className="product-hint-list pos-quick-product-grid">
             {isLoadingProducts ? (
               <div className="empty-state">
                 Chargement des produits rapides...
               </div>
             ) : (
-              products.map((product) => (
-                <div className="hint-card" key={product.id}>
-                  <h3>{product.name}</h3>
-                  <p>Code-barres: {product.barcode}</p>
-                  <p>Prix: {formatCurrencyDh(product.salePrice || 0)}</p>
-                  {getActiveVariants(product).length === 1 ? (
-                    <p>Variante: {getActiveVariants(product)[0]?.label || "-"}</p>
-                  ) : null}
-                  <p>
-                    Variantes actives: {getActiveVariants(product).length || 1}
-                  </p>
-                  <p className="muted-text">
-                    {product.active ? "Actif" : "Inactif"}
-                  </p>
-                  <button
-                    className="ghost-button small-button"
-                    type="button"
-                    onClick={() => handleQuickAdd(product)}
-                    disabled={!product.active || isSearchingBarcode}
+              products.map((product) => {
+                const activeVariants = getActiveVariants(product);
+                const hasSingleVariant = activeVariants.length === 1;
+                const shortVariantLabel = hasSingleVariant
+                  ? String(activeVariants[0]?.label || "-").slice(0, 36)
+                  : activeVariants.length > 1
+                    ? `${activeVariants.length} variantes`
+                    : "";
+
+                return (
+                  <div
+                    className="hint-card pos-quick-product-card"
+                    key={product.id}
+                    title={
+                      product.barcode
+                        ? `Code-barres: ${product.barcode}`
+                        : product.name
+                    }
                   >
-                    Ajout rapide
-                  </button>
-                </div>
-              ))
+                    <div className="pos-quick-product-head">
+                      <h3 title={product.name}>{product.name}</h3>
+                      <strong>{formatCurrencyDh(product.salePrice || 0)}</strong>
+                    </div>
+                    {shortVariantLabel ? (
+                      <p
+                        className="table-subtext pos-quick-product-variant"
+                        title={hasSingleVariant ? activeVariants[0]?.label || "-" : shortVariantLabel}
+                      >
+                        {shortVariantLabel}
+                      </p>
+                    ) : null}
+                    <div className="pos-quick-product-footer">
+                      <span
+                        className="pos-quick-product-barcode"
+                        title={product.barcode || "Sans code-barres"}
+                      >
+                        {product.barcode || "Sans code-barres"}
+                      </span>
+                      <button
+                        className="ghost-button small-button pos-quick-product-button"
+                        type="button"
+                        onClick={() => handleQuickAdd(product)}
+                        disabled={!product.active || isSearchingBarcode}
+                        aria-label={`Ajouter ${product.name}`}
+                      >
+                        +
+                      </button>
+                    </div>
+                  </div>
+                );
+              })
             )}
           </div>
         </SectionCard>
@@ -2360,54 +2387,59 @@ function PosPage() {
         title={variantSelection.product?.name || "Variante produit"}
         description="Selectionnez la taille et la couleur a ajouter au panier."
         onClose={closeVariantSelection}
+        cardClassName="modal-large pos-variant-modal"
+        bodyClassName="pos-variant-modal-body"
+        actionsClassName="pos-variant-modal-actions"
         actions={
           <button className="ghost-button" type="button" onClick={closeVariantSelection}>
             Fermer
           </button>
         }
       >
-        <DataTable
-          columns={[
-            { key: "variant", label: "Variante" },
-            { key: "size", label: "Taille" },
-            { key: "color", label: "Couleur" },
-            { key: "barcode", label: "Code-barres" },
-            { key: "stock", label: "Stock" },
-            { key: "price", label: "Prix" },
-            { key: "actions", label: "Action" },
-          ]}
-          data={variantSelection.variants}
-          emptyTitle="Aucune variante"
-          emptyDescription="Aucune variante active n'est disponible pour ce produit."
-          renderRow={(variant) => (
-            <tr key={variant.id}>
-              <td>{variant.label || "-"}</td>
-              <td>{variant.size || variant.taille || "Unique"}</td>
-              <td>{variant.color || variant.couleur || "-"}</td>
-              <td>{variant.barcode || "-"}</td>
-              <td>{variant.stock ?? 0}</td>
-              <td>{formatCurrencyDh(variant.salePrice || 0)}</td>
-              <td>
-                <button
-                  className="primary-button small-button"
-                  type="button"
-                  onClick={() => {
-                    const added = addProductWithStockCheck(
-                      variantSelection.product,
-                      variant
-                    );
+        <div className="pos-variant-table-wrap">
+          <DataTable
+            columns={[
+              { key: "variant", label: "Variante" },
+              { key: "size", label: "Taille" },
+              { key: "color", label: "Couleur" },
+              { key: "barcode", label: "Code-barres" },
+              { key: "stock", label: "Stock" },
+              { key: "actions", label: "Action" },
+            ]}
+            data={variantSelection.variants}
+            emptyTitle="Aucune variante"
+            emptyDescription="Aucune variante active n'est disponible pour ce produit."
+            renderRow={(variant) => (
+              <tr key={variant.id}>
+                <td>{variant.label || "-"}</td>
+                <td>{variant.size || variant.taille || "Unique"}</td>
+                <td>{variant.color || variant.couleur || "-"}</td>
+                <td title={variant.barcode || "-"}>
+                  <span className="pos-variant-barcode-cell">{variant.barcode || "-"}</span>
+                </td>
+                <td>{variant.stock ?? 0}</td>
+                <td>
+                  <button
+                    className="primary-button small-button"
+                    type="button"
+                    onClick={() => {
+                      const added = addProductWithStockCheck(
+                        variantSelection.product,
+                        variant
+                      );
 
-                    if (added) {
-                      closeVariantSelection();
-                    }
-                  }}
-                >
-                  Choisir
-                </button>
-              </td>
-            </tr>
-          )}
-        />
+                      if (added) {
+                        closeVariantSelection();
+                      }
+                    }}
+                  >
+                    Ajouter
+                  </button>
+                </td>
+              </tr>
+            )}
+          />
+        </div>
       </Modal>
 
       <PaymentModal

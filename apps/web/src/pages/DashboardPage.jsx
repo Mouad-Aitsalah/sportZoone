@@ -9,9 +9,10 @@ import SalesPieChart from "../components/charts/SalesPieChart";
 import TopProductsChart from "../components/charts/TopProductsChart";
 import SectionCard from "../components/SectionCard";
 import StatCard from "../components/StatCard";
+import { getCurrentUser } from "../store/authStore";
 import { cleanupLegacyStoreCache, getStoresCollection } from "../utils/storeAccess";
 import { CACHE_KEYS, CACHE_TTL_MS, readCache, writeCache } from "../utils/appCache";
-import { formatCurrencyDh } from "../utils/formatters";
+import { formatCurrencyDh, formatDateOnly } from "../utils/formatters";
 
 const periodOptions = [
   { key: "week", label: "7 derniers jours" },
@@ -20,7 +21,22 @@ const periodOptions = [
 
 const emptySalesMessage = "Pas encore de donnees de vente pour cette periode.";
 
+const getSlowMovingMeta = (item) => {
+  if (Number(item?.quantitySold30Days || 0) <= 0) {
+    return {
+      badgeTone: "danger",
+      rowClassName: "stock-row-critical",
+    };
+  }
+
+  return {
+    badgeTone: "stock-warning",
+    rowClassName: "stock-row-warning",
+  };
+};
+
 function DashboardPage() {
+  const currentUser = getCurrentUser();
   const [period, setPeriod] = useState("week");
   const [analytics, setAnalytics] = useState(null);
   const [stores, setStores] = useState([]);
@@ -127,6 +143,21 @@ function DashboardPage() {
 
     return null;
   }, [analytics, scopedStoreNames]);
+  const organisationName = useMemo(() => {
+    const currentOrganisationName = String(currentUser?.organisationName || "").trim();
+
+    if (currentOrganisationName) {
+      return currentOrganisationName;
+    }
+
+    const analyticsOrganisationName = String(analytics?.organisationName || "").trim();
+
+    return analyticsOrganisationName || "SportZone";
+  }, [analytics, currentUser?.organisationName]);
+  const slowMovingProducts = useMemo(
+    () => (Array.isArray(analytics?.slowMovingProducts) ? analytics.slowMovingProducts : []),
+    [analytics]
+  );
 
   const hasSales = Boolean(analytics?.hasSales);
   const lowStockCount = scopedAlerts.length;
@@ -166,14 +197,12 @@ function DashboardPage() {
         label: "Magasin suivi",
         value: isLoading
           ? "Chargement..."
-          : resolvedBestStore?.name || "SportZone",
-        detail: resolvedBestStore
-          ? `${formatCurrencyDh(resolvedBestStore.revenue || 0)} sur la periode.`
-          : "Le magasin unique SportZone sera affiche ici.",
+          : organisationName,
+        detail: `${formatCurrencyDh(resolvedBestStore?.revenue || analytics?.revenue || 0)} sur la periode.`,
         tone: "warning",
       },
     ],
-    [analytics, isLoading, period, resolvedBestStore]
+    [analytics, isLoading, organisationName, period, resolvedBestStore]
   );
 
   return (
@@ -316,6 +345,58 @@ function DashboardPage() {
           />
         </SectionCard>
       </div>
+
+      <SectionCard
+        title="Produits a faible rotation"
+        description="Articles en stock mais rarement vendus."
+        className="analytics-card"
+      >
+        <div className="dashboard-compact-table-wrap">
+          <DataTable
+            columns={[
+              { key: "product", label: "Produit" },
+              { key: "variant", label: "Variante" },
+              { key: "stock", label: "Stock" },
+              { key: "sold", label: "Vendus 30j" },
+              { key: "lastSale", label: "Derniere vente" },
+              { key: "status", label: "Statut" },
+            ]}
+            data={slowMovingProducts}
+            emptyTitle={isLoading ? "Chargement..." : "Aucun produit a faible rotation"}
+            emptyDescription="Les articles en stock avec peu de ventes apparaitront ici."
+            renderRow={(item) => {
+              const meta = getSlowMovingMeta(item);
+
+              return (
+                <tr
+                  key={`${item.productId}-${item.variantId || "base"}`}
+                  className={meta.rowClassName}
+                >
+                  <td>
+                    <strong>{item.productName || "-"}</strong>
+                  </td>
+                  <td>{item.variantName || "-"}</td>
+                  <td>{Number(item.stock || 0)}</td>
+                  <td>{Number(item.quantitySold30Days || 0)}</td>
+                  <td>
+                    {item.lastSaleDate ? (
+                      <>
+                        <div>{formatDateOnly(item.lastSaleDate)}</div>
+                        <div className="table-subtext">Derniere vente connue</div>
+                      </>
+                    ) : (
+                      <span>-</span>
+                    )}
+                  </td>
+                  <td>
+                    <Badge tone={meta.badgeTone}>{item.status || "-"}</Badge>
+                  </td>
+                </tr>
+              );
+            }}
+          />
+        </div>
+      </SectionCard>
 
       <Modal
         isOpen={isAlertsModalOpen}
