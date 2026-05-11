@@ -3362,7 +3362,7 @@ const createSale = async (req, res) => {
 
             await withTimedStep(`${attemptTimerLabel} create-lines`, async () =>
               tx.venteLigne.createMany({
-                data: lignesData.map(({ variant, ...line }) => ({
+                data: lignesData.map(({ variant, productName, variantName, ...line }) => ({
                   ...line,
                   venteId: createdSale.id,
                 })),
