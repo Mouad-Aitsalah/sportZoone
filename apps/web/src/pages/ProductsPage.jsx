@@ -81,20 +81,26 @@ const getPreferredSupplierId = (product = null, suppliers = []) => {
 };
 
 const getProductVariants = (product) => {
+  const resolveVariants = (variants) =>
+    variants.filter((variant) => (variant?.active ?? variant?.actif ?? true) !== false);
+
   if (Array.isArray(product?.variants)) {
-    return product.variants;
+    return resolveVariants(product.variants);
   }
 
   if (Array.isArray(product?.variantes)) {
-    return product.variantes;
+    return resolveVariants(product.variantes);
   }
 
   if (Array.isArray(product?.productVariants)) {
-    return product.productVariants;
+    return resolveVariants(product.productVariants);
   }
 
   return [];
 };
+
+const getActiveProductVariants = (product) =>
+  getProductVariants(product);
 
 const getVariantBarcodeValue = (variant) => variant?.barcode || variant?.codeBarres || "";
 
@@ -211,6 +217,7 @@ const createInitialFormData = (product = null, suppliers = []) => ({
       : "0",
   compteId: getPreferredSupplierId(product, suppliers),
   estActif: product?.active ?? true,
+  sansVariante: product ? getActiveProductVariants(product).length === 0 : false,
 });
 
 const resolveVariantNumber = (...values) => {
@@ -299,10 +306,9 @@ const createVariantDraft = (variant = null, product = null) => ({
 });
 
 const createInitialVariantsState = (product = null) => {
-  const variants = Array.isArray(product?.variants) && product.variants.length
-    ? product.variants
-    : [null];
-  return variants.map((variant) => createVariantDraft(variant, product));
+  const variants = getActiveProductVariants(product);
+  const sourceVariants = variants.length ? variants : [null];
+  return sourceVariants.map((variant) => createVariantDraft(variant, product));
 };
 
 const createInitialVariantBuilderState = () => ({
@@ -336,6 +342,7 @@ const getProductWriteUrl = () =>
   api.defaults.baseURL?.replace(/\/api\/?$/, "/products") || "/products";
 
 const getProductsCatalogResource = () => cacheResources.productsCatalog();
+const getStoresResource = () => cacheResources.stores();
 const getSupplierAccountsResource = () =>
   cacheResources.comptes({
     type: "FOURNISSEUR",
@@ -412,6 +419,22 @@ const buildProductPayload = (formData) => ({
   compteId: formData.compteId ? Number(formData.compteId) : null,
   estActif: formData.estActif,
 });
+
+const buildInitialStocksPayload = (initialStocksByStore = {}) =>
+  Object.entries(initialStocksByStore).reduce((entries, [storeId, quantity]) => {
+    const normalizedStoreId = Number(storeId);
+    const normalizedQuantity = quantity === "" ? 0 : Number(quantity);
+
+    if (!Number.isInteger(normalizedStoreId) || Number.isNaN(normalizedQuantity)) {
+      return entries;
+    }
+
+    entries.push({
+      storeId: normalizedStoreId,
+      quantity: normalizedQuantity,
+    });
+    return entries;
+  }, []);
 
 const formatCompactCount = (value) =>
   new Intl.NumberFormat("fr-MA", {
@@ -632,6 +655,17 @@ function ProductFormFields({
         <span>Statut actif</span>
       </label>
 
+      <label className="checkbox-field" htmlFor="product-no-variant">
+        <input
+          id="product-no-variant"
+          type="checkbox"
+          name="sansVariante"
+          checked={Boolean(formData.sansVariante)}
+          onChange={onChange}
+        />
+        <span>Ce produit n'a pas de variante</span>
+      </label>
+
       {showInitialStocks ? (
         <div className="initial-stock-section">
           <div>
@@ -785,6 +819,13 @@ function ProductsPage() {
     setCategories(nextCategories);
     setHasLoadedCategoriesFromApi(true);
     return nextCategories;
+  };
+
+  const fetchStores = async () => {
+    const nextStores = await refreshCachedResource(getStoresResource());
+    setStores(nextStores);
+    setStoresError("");
+    return nextStores;
   };
 
   useEffect(() => {
@@ -987,6 +1028,43 @@ function ProductsPage() {
     }
   };
 
+  const ensureStoresLoaded = async () => {
+    if (!canManageProducts) {
+      return [];
+    }
+
+    if (stores.length) {
+      return stores;
+    }
+
+    const cachedStores = readCachedResourceData(getStoresResource(), []);
+
+    if (cachedStores.length) {
+      setStores(cachedStores);
+      void fetchStores().catch(() => {});
+      return cachedStores;
+    }
+
+    if (isLoadingStores) {
+      return [];
+    }
+
+    setIsLoadingStores(true);
+    setStoresError("");
+
+    try {
+      return await fetchStores();
+    } catch (error) {
+      setStoresError(
+        error.response?.data?.message ||
+          "Impossible de charger les magasins pour le stock initial."
+      );
+      throw error;
+    } finally {
+      setIsLoadingStores(false);
+    }
+  };
+
   const openProductModal = async (mode, product = null) => {
     setNotice({ type: "", message: "" });
     setProductModalError("");
@@ -1002,14 +1080,19 @@ function ProductsPage() {
 
     try {
       const loadedSuppliers = await ensureSuppliersLoaded();
-      await ensureCategoriesLoaded();
+      const [, loadedStores] = await Promise.all([
+        ensureCategoriesLoaded(),
+        ensureStoresLoaded(),
+      ]);
       const resolvedSuppliers =
         Array.isArray(loadedSuppliers) && loadedSuppliers.length ? loadedSuppliers : suppliers;
+      const resolvedStores =
+        Array.isArray(loadedStores) && loadedStores.length ? loadedStores : stores;
 
       setProductFormData(createInitialFormData(product, resolvedSuppliers));
 
       if (mode === "add") {
-        setInitialStocksByStore(createInitialStocksState(stores));
+        setInitialStocksByStore(createInitialStocksState(resolvedStores));
       }
     } catch (error) {
       setProductModalError(
@@ -1269,12 +1352,17 @@ function ProductsPage() {
 
   const handleFormChange = (event) => {
     const { name, value, type, checked } = event.target;
+    const nextValue = type === "checkbox" ? checked : value;
 
     setProductModalError("");
     setProductFormData((current) => ({
       ...current,
-      [name]: type === "checkbox" ? checked : value,
+      [name]: nextValue,
     }));
+
+    if (name === "sansVariante" && nextValue) {
+      setVariantBuilder(createInitialVariantBuilderState());
+    }
   };
 
   const handleInitialStockChange = (storeId, value) => {
@@ -1528,6 +1616,16 @@ function ProductsPage() {
       return "Le prix detail est obligatoire.";
     }
 
+    if (formData.sansVariante) {
+      for (const value of Object.values(initialStocksByStore)) {
+        if (value !== "" && Number.isNaN(Number(value))) {
+          return "Le stock initial doit contenir une quantite valide.";
+        }
+      }
+
+      return "";
+    }
+
     if (!productVariants.length) {
       return "Au moins une variante est obligatoire.";
     }
@@ -1587,25 +1685,31 @@ function ProductsPage() {
 
       const payload = {
         ...buildProductPayload(productFormData),
-        variants: productVariants.map((variant) => ({
-          ...(variant.id ? { id: variant.id } : {}),
-          taille: variant.taille.trim(),
-          couleur: variant.couleur.trim() || DEFAULT_VARIANT_COLOR,
-          valeursVariante:
-            String(
-              variant.valeursVariante ||
-                buildVariantValuesText(variant.taille, variant.couleur)
-            ).trim() || null,
-          codeBarres: variant.codeBarres.trim() || null,
-          prixAchat: Number(variant.prixAchat || productFormData.prixAchat || 0),
-          prixVente: Number(variant.prixVente || productFormData.prixDetail || 0),
-          quantiteStock:
-            variant.quantiteStock === "" ? 0 : Number(variant.quantiteStock),
-          seuilMinimum:
-            variant.seuilMinimum === "" ? 0 : Number(variant.seuilMinimum),
-          actif: variant.actif,
-        })),
+        variants: productFormData.sansVariante
+          ? []
+          : productVariants.map((variant) => ({
+              ...(variant.id ? { id: variant.id } : {}),
+              taille: variant.taille.trim(),
+              couleur: variant.couleur.trim() || DEFAULT_VARIANT_COLOR,
+              valeursVariante:
+                String(
+                  variant.valeursVariante ||
+                    buildVariantValuesText(variant.taille, variant.couleur)
+                ).trim() || null,
+              codeBarres: variant.codeBarres.trim() || null,
+              prixAchat: Number(variant.prixAchat || productFormData.prixAchat || 0),
+              prixVente: Number(variant.prixVente || productFormData.prixDetail || 0),
+              quantiteStock:
+                variant.quantiteStock === "" ? 0 : Number(variant.quantiteStock),
+              seuilMinimum:
+                variant.seuilMinimum === "" ? 0 : Number(variant.seuilMinimum),
+              actif: variant.actif,
+            })),
       };
+
+      if (productFormData.sansVariante && productModal.mode === "add") {
+        payload.initialStocks = buildInitialStocksPayload(initialStocksByStore);
+      }
 
       if (productModal.mode === "edit" && productModal.product?.id) {
         await api.put(`${getProductWriteUrl()}/${productModal.product.id}`, payload);
@@ -1669,7 +1773,7 @@ function ProductsPage() {
   const productModalDescription =
     productModal.mode === "edit"
       ? "Mettez \u00E0 jour les informations du produit s\u00E9lectionn\u00E9."
-      : "Renseignez les informations principales pour ajouter une nouvelle reference au catalogue.";
+      : "Renseignez les informations principales pour ajouter une nouvelle reference au catalogue, avec ou sans variante.";
   const productModalSubmitLabel =
     productModal.mode === "edit"
       ? isSubmittingProduct
@@ -1678,6 +1782,8 @@ function ProductsPage() {
       : isSubmittingProduct
       ? "Ajout en cours..."
       : "Ajouter produit";
+
+  const isSimpleProduct = Boolean(productFormData.sansVariante);
 
   return (
     <div>
@@ -1814,10 +1920,7 @@ function ProductsPage() {
                   <td>
                     <strong>{product.name}</strong>
                     <div className="muted-text product-variant-summary">
-                      <span>
-                        {variants.length || 1} variante
-                        {(variants.length || 1) > 1 ? "s" : ""}
-                      </span>
+                      <span>{variants.length ? `${variants.length} variante${variants.length > 1 ? "s" : ""}` : "Sans variante"}</span>
                       {hasMultipleVariants ? (
                         <button
                           className={`variant-toggle-button ${
@@ -2153,171 +2256,178 @@ function ProductsPage() {
             isLoadingStores={isLoadingStores}
             initialStocksByStore={initialStocksByStore}
             onInitialStockChange={handleInitialStockChange}
-            showInitialStocks={false}
+            showInitialStocks={productModal.mode === "add" && isSimpleProduct}
           />
 
-          <div className="initial-stock-section">
-            <div className="table-toolbar">
-              <div>
-                <p className="section-card-title">Variantes produit</p>
-                <p className="section-card-description">
-                  Generez d'abord les variantes par taille et couleur, puis renseignez le stock de chaque combinaison.
-                </p>
-                <p className="section-card-description">
-                  Les codes-barres du produit et des variantes seront generes automatiquement a l'enregistrement.
-                </p>
-              </div>
-              <div className="variant-builder-actions">
-                <button
-                  className="ghost-button"
-                  type="button"
-                  onClick={handleOpenVariantBuilder}
-                >
-                  Ajouter variante
-                </button>
-                <button
-                  className="ghost-button"
-                  type="button"
-                  onClick={handleResetToDefaultVariant}
-                >
-                  Variante par defaut
-                </button>
-              </div>
+          {isSimpleProduct ? (
+            <div className="inline-notice info">
+              Ce produit sera cree sans variante. Le stock et le prix de vente seront portes par
+              la fiche produit principale.
             </div>
-
-            {variantBuilder.isOpen ? (
-              <div className="variant-builder-panel">
-                <div className="variant-mode-row">
-                  {Object.entries(VARIANT_MODE_LABELS).map(([mode, label]) => (
-                    <button
-                      key={mode}
-                      className={`period-button ${
-                        variantBuilder.mode === mode ? "active" : ""
-                      }`}
-                      type="button"
-                      onClick={() => handleSelectVariantMode(mode)}
-                    >
-                      {label}
-                    </button>
-                  ))}
+          ) : (
+            <div className="initial-stock-section">
+              <div className="table-toolbar">
+                <div>
+                  <p className="section-card-title">Variantes produit</p>
+                  <p className="section-card-description">
+                    Generez d'abord les variantes par taille et couleur, puis renseignez le stock
+                    de chaque combinaison.
+                  </p>
+                  <p className="section-card-description">
+                    Les codes-barres des variantes restent optionnels.
+                  </p>
                 </div>
-
-                {variantBuilder.mode === "size" || variantBuilder.mode === "sizeColor" ? (
-                  <div className="variant-builder-block">
-                    <p className="field-label">Tailles</p>
-                    <div className="variant-chip-grid">
-                      {DEFAULT_SIZE_OPTIONS.map((size) => (
-                        <button
-                          key={size}
-                          className={`variant-chip ${
-                            variantBuilder.selectedSizes.includes(size) ? "active" : ""
-                          }`}
-                          type="button"
-                          onClick={() => handleToggleBuilderSize(size)}
-                        >
-                          {size}
-                        </button>
-                      ))}
-                    </div>
-
-                    <div className="variant-inline-form">
-                      <input
-                        className="text-input"
-                        type="text"
-                        placeholder="Ajouter une taille personnalisee"
-                        value={variantBuilder.customSize}
-                        onChange={(event) =>
-                          handleBuilderInputChange("customSize", event.target.value)
-                        }
-                      />
-                      <button
-                        className="ghost-button"
-                        type="button"
-                        onClick={handleAddCustomSize}
-                      >
-                        Ajouter taille
-                      </button>
-                    </div>
-                  </div>
-                ) : null}
-
-                {variantBuilder.mode === "color" || variantBuilder.mode === "sizeColor" ? (
-                  <div className="variant-builder-block">
-                    <p className="field-label">Couleurs</p>
-                    <div className="variant-inline-form">
-                      <input
-                        className="text-input"
-                        type="text"
-                        placeholder="Rouge, Noir, Bleu, Blanc..."
-                        value={variantBuilder.colorInput}
-                        onChange={(event) =>
-                          handleBuilderInputChange("colorInput", event.target.value)
-                        }
-                      />
-                      <button
-                        className="ghost-button"
-                        type="button"
-                        onClick={handleAddColor}
-                      >
-                        Ajouter couleur
-                      </button>
-                    </div>
-
-                    {variantBuilder.colors.length ? (
-                      <div className="variant-chip-grid">
-                        {variantBuilder.colors.map((color) => (
-                          <button
-                            key={color}
-                            className="variant-chip active"
-                            type="button"
-                            onClick={() => handleRemoveColor(color)}
-                          >
-                            {color}
-                          </button>
-                        ))}
-                      </div>
-                    ) : null}
-                  </div>
-                ) : null}
-
-                <div className="variant-inline-form end">
+                <div className="variant-builder-actions">
                   <button
                     className="ghost-button"
                     type="button"
-                    onClick={() => setVariantBuilder(createInitialVariantBuilderState())}
+                    onClick={handleOpenVariantBuilder}
                   >
-                    Fermer
+                    Ajouter variante
                   </button>
                   <button
-                    className="primary-button"
+                    className="ghost-button"
                     type="button"
-                    onClick={handleGenerateVariants}
+                    onClick={handleResetToDefaultVariant}
                   >
-                    Generer variantes
+                    Variante par defaut
                   </button>
                 </div>
               </div>
-            ) : null}
 
-            <div className="table-wrapper product-variant-edit-wrap">
-              <table className="data-table product-variant-edit-table">
-                <thead>
-                  <tr>
-                    <th>Taille</th>
-                    <th>Couleur</th>
-                    <th>Valeurs variante</th>
-                    <th>Code-barres</th>
-                    <th>Prix achat</th>
-                    <th>Prix vente</th>
-                    <th>Stock</th>
-                    <th>Seuil mini</th>
-                    <th>Actif</th>
-                    <th>Supprimer</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {productVariants.map((variant, index) => (
-                    <tr key={variant.id || `variant-${index}`}>
+              {variantBuilder.isOpen ? (
+                <div className="variant-builder-panel">
+                  <div className="variant-mode-row">
+                    {Object.entries(VARIANT_MODE_LABELS).map(([mode, label]) => (
+                      <button
+                        key={mode}
+                        className={`period-button ${
+                          variantBuilder.mode === mode ? "active" : ""
+                        }`}
+                        type="button"
+                        onClick={() => handleSelectVariantMode(mode)}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {variantBuilder.mode === "size" || variantBuilder.mode === "sizeColor" ? (
+                    <div className="variant-builder-block">
+                      <p className="field-label">Tailles</p>
+                      <div className="variant-chip-grid">
+                        {DEFAULT_SIZE_OPTIONS.map((size) => (
+                          <button
+                            key={size}
+                            className={`variant-chip ${
+                              variantBuilder.selectedSizes.includes(size) ? "active" : ""
+                            }`}
+                            type="button"
+                            onClick={() => handleToggleBuilderSize(size)}
+                          >
+                            {size}
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="variant-inline-form">
+                        <input
+                          className="text-input"
+                          type="text"
+                          placeholder="Ajouter une taille personnalisee"
+                          value={variantBuilder.customSize}
+                          onChange={(event) =>
+                            handleBuilderInputChange("customSize", event.target.value)
+                          }
+                        />
+                        <button
+                          className="ghost-button"
+                          type="button"
+                          onClick={handleAddCustomSize}
+                        >
+                          Ajouter taille
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {variantBuilder.mode === "color" || variantBuilder.mode === "sizeColor" ? (
+                    <div className="variant-builder-block">
+                      <p className="field-label">Couleurs</p>
+                      <div className="variant-inline-form">
+                        <input
+                          className="text-input"
+                          type="text"
+                          placeholder="Rouge, Noir, Bleu, Blanc..."
+                          value={variantBuilder.colorInput}
+                          onChange={(event) =>
+                            handleBuilderInputChange("colorInput", event.target.value)
+                          }
+                        />
+                        <button
+                          className="ghost-button"
+                          type="button"
+                          onClick={handleAddColor}
+                        >
+                          Ajouter couleur
+                        </button>
+                      </div>
+
+                      {variantBuilder.colors.length ? (
+                        <div className="variant-chip-grid">
+                          {variantBuilder.colors.map((color) => (
+                            <button
+                              key={color}
+                              className="variant-chip active"
+                              type="button"
+                              onClick={() => handleRemoveColor(color)}
+                            >
+                              {color}
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+
+                  <div className="variant-inline-form end">
+                    <button
+                      className="ghost-button"
+                      type="button"
+                      onClick={() => setVariantBuilder(createInitialVariantBuilderState())}
+                    >
+                      Fermer
+                    </button>
+                    <button
+                      className="primary-button"
+                      type="button"
+                      onClick={handleGenerateVariants}
+                    >
+                      Generer variantes
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="table-wrapper product-variant-edit-wrap">
+                <table className="data-table product-variant-edit-table">
+                  <thead>
+                    <tr>
+                      <th>Taille</th>
+                      <th>Couleur</th>
+                      <th>Valeurs variante</th>
+                      <th>Code-barres</th>
+                      <th>Prix achat</th>
+                      <th>Prix vente</th>
+                      <th>Stock</th>
+                      <th>Seuil mini</th>
+                      <th>Actif</th>
+                      <th>Supprimer</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {productVariants.map((variant, index) => (
+                      <tr key={variant.id || `variant-${index}`}>
                       <td>
                         <input
                           className="text-input variant-input"
@@ -2436,12 +2546,13 @@ function ProductsPage() {
                           Retirer
                         </button>
                       </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
-          </div>
+          )}
         </form>
       </Modal>
 

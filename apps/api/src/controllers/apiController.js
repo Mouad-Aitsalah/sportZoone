@@ -156,6 +156,7 @@ const buildProductsStats = async (organisationId) => {
     missingVariantBarcodes,
     negativeVariants,
     negativeProductGroups,
+    negativeSimpleProducts,
   ] = await Promise.all([
     prisma.produit.count({
       where: {
@@ -170,7 +171,7 @@ const buildProductsStats = async (organisationId) => {
     prisma.produit.count({
       where: {
         organisationId,
-        codeBarres: "",
+        OR: [{ codeBarres: null }, { codeBarres: "" }],
       },
     }),
     prisma.produitVariante.count({
@@ -196,6 +197,23 @@ const buildProductsStats = async (organisationId) => {
         quantiteStock: true,
       },
     }),
+    prisma.produit.count({
+      where: {
+        organisationId,
+        variantes: {
+          none: {
+            actif: true,
+          },
+        },
+        stocks: {
+          some: {
+            quantite: {
+              lt: 0,
+            },
+          },
+        },
+      },
+    }),
   ]);
 
   return {
@@ -204,7 +222,8 @@ const buildProductsStats = async (organisationId) => {
     missingBarcodes: missingProductBarcodes + missingVariantBarcodes,
     negativeStockCount:
       negativeVariants +
-      negativeProductGroups.filter((entry) => Number(entry._sum.quantiteStock || 0) < 0).length,
+      negativeProductGroups.filter((entry) => Number(entry._sum.quantiteStock || 0) < 0).length +
+      negativeSimpleProducts,
   };
 };
 
@@ -350,6 +369,9 @@ const buildEmptySalesStats = () => ({
   ticketsCount: 0,
 });
 
+const sumProductStocks = (stocks = []) =>
+  stocks.reduce((total, stock) => total + Number(stock?.quantite || 0), 0);
+
 const toApiProduct = (product, salesStats = null) => {
   const normalizedSalesStats = salesStats || buildEmptySalesStats();
   const variants = (product.variantes || []).map((variant) => {
@@ -364,6 +386,7 @@ const toApiProduct = (product, salesStats = null) => {
     };
   });
   const activeVariants = variants.filter((variant) => variant.active);
+  const stockFromRows = Array.isArray(product.stocks) ? sumProductStocks(product.stocks) : null;
 
   return {
   id: product.id,
@@ -393,7 +416,9 @@ const toApiProduct = (product, salesStats = null) => {
   stock:
     product.stock !== undefined && product.stock !== null
       ? Number(product.stock)
-      : sumVariantStock(variants),
+      : stockFromRows === null
+        ? sumVariantStock(variants)
+        : stockFromRows,
   minimumThreshold: Number(product.seuilMinimum || 0),
   quantitySold: Number(normalizedSalesStats.quantitySold || 0),
   revenue: Number(normalizedSalesStats.revenue || 0),
@@ -1147,6 +1172,18 @@ const ensureVariantForProduct = async (organisationId, produitId, varianteId) =>
   return variant;
 };
 
+const hasActiveVariantsForProduct = async (db, organisationId, produitId) => {
+  const activeVariantsCount = await db.produitVariante.count({
+    where: {
+      organisationId,
+      produitId,
+      actif: true,
+    },
+  });
+
+  return activeVariantsCount > 0;
+};
+
 const isEmptyRequestBody = (body) =>
   !body ||
   (typeof body === "object" &&
@@ -1514,6 +1551,10 @@ const ensureResolvedVariant = ({
     (variant) => variant.actif
   );
 
+  if (activeVariants.length === 0) {
+    return null;
+  }
+
   if (activeVariants.length !== 1) {
     throw createHttpError(
       400,
@@ -1652,6 +1693,11 @@ const getProducts = async (req, res) => {
         quantiteStock: true,
         seuilMinimum: true,
         actif: true,
+      },
+    },
+    stocks: {
+      select: {
+        quantite: true,
       },
     },
   };
@@ -1953,6 +1999,11 @@ const getProductByBarcode = async (req, res) => {
           variantes: {
             orderBy: [{ id: "asc" }],
           },
+          stocks: {
+            select: {
+              quantite: true,
+            },
+          },
         },
       },
     },
@@ -1988,6 +2039,11 @@ const getProductByBarcode = async (req, res) => {
           },
           variantes: {
             orderBy: [{ id: "asc" }],
+          },
+          stocks: {
+            select: {
+              quantite: true,
+            },
           },
         },
       });
@@ -2041,29 +2097,97 @@ const getStocks = async (req, res) => {
         select: { id: true, nom: true },
       });
 
-  const variantRows = await prisma.produitVariante.findMany({
-    where: {
-      organisationId,
-      produit: {
-        estActif: true,
-      },
-    },
-    include: {
-      produit: {
-        select: {
-          id: true,
-          nom: true,
-          codeBarres: true,
-          categorie: true,
-          seuilMinimum: true,
-          prixAchat: true,
+  const [variantRows, simpleProducts] = await Promise.all([
+    prisma.produitVariante.findMany({
+      where: {
+        organisationId,
+        actif: true,
+        produit: {
+          estActif: true,
         },
       },
-    },
-    orderBy: [{ produit: { nom: "asc" } }, { id: "asc" }],
+      include: {
+        produit: {
+          select: {
+            id: true,
+            nom: true,
+            codeBarres: true,
+            categorie: true,
+            seuilMinimum: true,
+            prixAchat: true,
+          },
+        },
+      },
+      orderBy: [{ produit: { nom: "asc" } }, { id: "asc" }],
+    }),
+    prisma.produit.findMany({
+      where: {
+        organisationId,
+        estActif: true,
+        variantes: {
+          none: {
+            actif: true,
+          },
+        },
+      },
+      select: {
+        id: true,
+        nom: true,
+        codeBarres: true,
+        categorie: true,
+        seuilMinimum: true,
+        prixAchat: true,
+        stocks: {
+          where: store?.id
+            ? {
+                organisationId,
+                pointDeVenteId: store.id,
+              }
+            : {
+                organisationId,
+              },
+          select: {
+            id: true,
+            quantite: true,
+            pointDeVenteId: true,
+            pointDeVente: {
+              select: {
+                nom: true,
+              },
+            },
+          },
+          orderBy: {
+            pointDeVenteId: "asc",
+          },
+          take: 1,
+        },
+      },
+      orderBy: [{ nom: "asc" }, { id: "asc" }],
+    }),
+  ]);
+
+  const simpleProductRows = simpleProducts.map((product) => {
+    const stockRow = product.stocks[0] || null;
+
+    return toApiStock({
+      id: `product-${product.id}`,
+      productId: product.id,
+      productName: product.nom || "",
+      variantId: null,
+      variantSize: null,
+      variantColor: null,
+      variantLabel: null,
+      category: product.categorie || "",
+      barcode: product.codeBarres || "",
+      storeId: stockRow?.pointDeVenteId ?? store?.id ?? null,
+      storeName: stockRow?.pointDeVente?.nom || store?.nom || "",
+      quantity: Number(stockRow?.quantite || 0),
+      purchasePrice: product.prixAchat ?? 0,
+      minimumThreshold: product.seuilMinimum ?? 0,
+    }, { includeFinancialFields });
   });
 
-  const allStockRows = variantRows.map((variant) =>
+  const allStockRows = [...variantRows.map((variant) =>
     toApiStock({
       id: variant.id,
       productId: variant.produitId,
@@ -2082,6 +2206,10 @@ const getStocks = async (req, res) => {
           : variant.prixAchat,
       minimumThreshold: variant.seuilMinimum ?? variant.produit?.seuilMinimum ?? 0,
     }, { includeFinancialFields })
+  ), ...simpleProductRows];
+
+  allStockRows.sort((left, right) =>
+    String(left.productName || "").localeCompare(String(right.productName || ""), "fr")
   );
 
   const total = allStockRows.length;
@@ -2123,24 +2251,56 @@ const getStockAlerts = async (req, res) => {
         select: { id: true, nom: true },
         orderBy: { id: "asc" },
       }));
-  const variants = await prisma.produitVariante.findMany({
-    where: {
-      organisationId,
-      actif: true,
-      produit: {
-        estActif: true,
-      },
-    },
-    include: {
-      produit: {
-        select: {
-          id: true,
-          nom: true,
-          seuilMinimum: true,
+  const [variants, simpleProducts] = await Promise.all([
+    prisma.produitVariante.findMany({
+      where: {
+        organisationId,
+        actif: true,
+        produit: {
+          estActif: true,
         },
       },
-    },
-  });
+      include: {
+        produit: {
+          select: {
+            id: true,
+            nom: true,
+            seuilMinimum: true,
+          },
+        },
+      },
+    }),
+    prisma.produit.findMany({
+      where: {
+        organisationId,
+        estActif: true,
+        variantes: {
+          none: {
+            actif: true,
+          },
+        },
+      },
+      select: {
+        id: true,
+        nom: true,
+        seuilMinimum: true,
+        stocks: {
+          where: store?.id
+            ? {
+                organisationId,
+                pointDeVenteId: store.id,
+              }
+            : {
+                organisationId,
+              },
+          select: {
+            quantite: true,
+          },
+          take: 1,
+        },
+      },
+    }),
+  ]);
 
   const lowStockItems = [];
 
@@ -2162,6 +2322,32 @@ const getStockAlerts = async (req, res) => {
       taille: getVariantSize(variant),
       couleur: getVariantColor(variant),
       variante: getVariantLabel(variant),
+      magasin: store?.nom || "",
+      magasinId: store?.id || null,
+      quantite: quantity,
+      seuilMinimum: minimumThreshold,
+      isLowStock: true,
+      severity: statusMeta.severity,
+      status: statusMeta.status,
+    });
+  }
+
+  for (const product of simpleProducts) {
+    const quantity = Number(product.stocks[0]?.quantite || 0);
+    const minimumThreshold = Number(product.seuilMinimum || 0);
+    const statusMeta = getStockStatusMeta(quantity, minimumThreshold);
+
+    if (!statusMeta.isLowStock) {
+      continue;
+    }
+
+    lowStockItems.push({
+      id: `product-${product.id}`,
+      produitId: product.id,
+      produitNom: product.nom || "",
+      taille: null,
+      couleur: null,
+      variante: null,
       magasin: store?.nom || "",
       magasinId: store?.id || null,
       quantite: quantity,
@@ -2201,8 +2387,96 @@ const stockIn = async (req, res) => {
   const reason = normalizeOptionalString(parsedInput.reason);
 
   await ensureProductAndStoreExist(req.user, productId, storeId);
-  if (Number.isNaN(variantId) || variantId === null) {
+  if (Number.isNaN(variantId)) {
     throw createHttpError(400, "variantId must be a valid positive integer.");
+  }
+
+  const storeName = (await prisma.pointDeVente.findUnique({
+    where: { id: storeId },
+    select: { nom: true },
+  }))?.nom || "";
+
+  if (variantId === null) {
+    const hasActiveVariants = await hasActiveVariantsForProduct(prisma, organisationId, productId);
+
+    if (hasActiveVariants) {
+      throw createHttpError(400, "variantId is required for products with variants.");
+    }
+
+    await prisma.$transaction(async (tx) => {
+      await tx.stock.upsert({
+        where: {
+          organisationId_produitId_pointDeVenteId: {
+            organisationId,
+            produitId: productId,
+            pointDeVenteId: storeId,
+          },
+        },
+        update: {
+          quantite: {
+            increment: quantity,
+          },
+        },
+        create: {
+          organisationId,
+          produitId: productId,
+          pointDeVenteId: storeId,
+          quantite: quantity,
+        },
+      });
+
+      await createStockMovement(tx, {
+        organisationId,
+        productId,
+        storeId,
+        quantity,
+        type: "IN",
+        reason,
+      });
+    });
+
+    const [product, stockRow] = await Promise.all([
+      prisma.produit.findFirst({
+        where: {
+          organisationId,
+          id: productId,
+        },
+        select: {
+          nom: true,
+          codeBarres: true,
+          seuilMinimum: true,
+          prixAchat: true,
+        },
+      }),
+      prisma.stock.findFirst({
+        where: {
+          organisationId,
+          produitId: productId,
+          pointDeVenteId: storeId,
+        },
+        select: {
+          quantite: true,
+        },
+      }),
+    ]);
+
+    return res.status(200).json(
+      toApiStock({
+        id: `product-${productId}`,
+        productId,
+        productName: product?.nom || "",
+        variantId: null,
+        variantSize: null,
+        variantColor: null,
+        variantLabel: null,
+        barcode: product?.codeBarres || "",
+        storeId,
+        storeName,
+        quantity: Number(stockRow?.quantite || 0),
+        purchasePrice: product?.prixAchat ?? 0,
+        minimumThreshold: product?.seuilMinimum ?? 0,
+      })
+    );
   }
 
   const variant = await ensureVariantForProduct(organisationId, productId, variantId);
@@ -2245,10 +2519,7 @@ const stockIn = async (req, res) => {
       variantLabel: getVariantLabel(updatedVariant),
       barcode: updatedVariant.codeBarres || updatedVariant.produit?.codeBarres || "",
       storeId,
-      storeName: (await prisma.pointDeVente.findUnique({
-        where: { id: storeId },
-        select: { nom: true },
-      }))?.nom || "",
+      storeName,
       quantity: updatedVariant.quantiteStock,
       minimumThreshold:
         updatedVariant.seuilMinimum ?? updatedVariant.produit?.seuilMinimum ?? 0,
@@ -2272,8 +2543,103 @@ const stockCorrection = async (req, res) => {
   const reason = normalizeOptionalString(parsedInput.reason);
 
   await ensureProductAndStoreExist(req.user, productId, storeId);
-  if (Number.isNaN(variantId) || variantId === null) {
+  if (Number.isNaN(variantId)) {
     throw createHttpError(400, "variantId must be a valid positive integer.");
+  }
+
+  const storeName = (await prisma.pointDeVente.findUnique({
+    where: { id: storeId },
+    select: { nom: true },
+  }))?.nom || "";
+
+  if (variantId === null) {
+    const hasActiveVariants = await hasActiveVariantsForProduct(prisma, organisationId, productId);
+
+    if (hasActiveVariants) {
+      throw createHttpError(400, "variantId is required for products with variants.");
+    }
+
+    const stock = await prisma.$transaction(async (tx) => {
+      const existingStock = await tx.stock.findFirst({
+        where: {
+          organisationId,
+          produitId: productId,
+          pointDeVenteId: storeId,
+        },
+      });
+      const quantityDelta = quantity - Number(existingStock?.quantite || 0);
+
+      await tx.stock.upsert({
+        where: {
+          organisationId_produitId_pointDeVenteId: {
+            organisationId,
+            produitId: productId,
+            pointDeVenteId: storeId,
+          },
+        },
+        update: {
+          quantite: quantity,
+        },
+        create: {
+          organisationId,
+          produitId: productId,
+          pointDeVenteId: storeId,
+          quantite: quantity,
+        },
+      });
+
+      await createStockMovement(tx, {
+        organisationId,
+        productId,
+        storeId,
+        quantity: quantityDelta,
+        type: "CORRECTION",
+        reason,
+      });
+
+      return Promise.all([
+        tx.produit.findFirst({
+          where: {
+            organisationId,
+            id: productId,
+          },
+          select: {
+            nom: true,
+            codeBarres: true,
+            seuilMinimum: true,
+            prixAchat: true,
+          },
+        }),
+        tx.stock.findFirst({
+          where: {
+            organisationId,
+            produitId: productId,
+            pointDeVenteId: storeId,
+          },
+          select: {
+            quantite: true,
+          },
+        }),
+      ]);
+    });
+
+    return res.status(200).json(
+      toApiStock({
+        id: `product-${productId}`,
+        productId,
+        productName: stock[0]?.nom || "",
+        variantId: null,
+        variantSize: null,
+        variantColor: null,
+        variantLabel: null,
+        barcode: stock[0]?.codeBarres || "",
+        storeId,
+        storeName,
+        quantity: Number(stock[1]?.quantite || 0),
+        purchasePrice: stock[0]?.prixAchat ?? 0,
+        minimumThreshold: stock[0]?.seuilMinimum ?? 0,
+      })
+    );
   }
 
   const stock = await prisma.$transaction(async (tx) => {
@@ -2563,6 +2929,8 @@ const createSale = async (req, res) => {
                       nom: true,
                       seuilMinimum: true,
                       estActif: true,
+                      prixVente: true,
+                      prixDetail: true,
                       variantes: {
                         orderBy: [{ id: "asc" }],
                         select: {
@@ -2576,6 +2944,15 @@ const createSale = async (req, res) => {
                           quantiteStock: true,
                           seuilMinimum: true,
                           actif: true,
+                        },
+                      },
+                      stocks: {
+                        where: {
+                          organisationId,
+                          pointDeVenteId: storeId,
+                        },
+                        select: {
+                          quantite: true,
                         },
                       },
                     },
@@ -2620,10 +2997,12 @@ const createSale = async (req, res) => {
             const nextStockByProductId = new Map(
               produits.map((produit) => [
                 produit.id,
-                (produit.variantes || []).reduce(
-                  (sum, variant) => sum + Number(variant.quantiteStock || 0),
-                  0
-                ),
+                (produit.variantes || []).length > 0
+                  ? (produit.variantes || []).reduce(
+                      (sum, variant) => sum + Number(variant.quantiteStock || 0),
+                      0
+                    )
+                  : Number(produit.stocks?.[0]?.quantite || 0),
               ])
             );
 
@@ -2643,7 +3022,7 @@ const createSale = async (req, res) => {
                 variantsByProductId,
               });
 
-              if (!variant.actif) {
+              if (variant && !variant.actif) {
                 throw createHttpError(
                   400,
                   `Variant ${getVariantLabel(variant)} is inactive for product ${produit.nom}.`
@@ -2662,11 +3041,12 @@ const createSale = async (req, res) => {
               lignesData.push({
                 organisationId,
                 produitId: item.productId,
-                varianteId: variant.id,
+                varianteId: variant?.id || null,
                 quantite: item.quantity,
                 prixUnitaire,
                 sousTotal,
                 variant,
+                productName: produit.nom,
               });
             }
 
@@ -2837,6 +3217,10 @@ const createSale = async (req, res) => {
 
             await withTimedStep(`${attemptTimerLabel} update-stock`, async () => {
               for (const line of lignesData) {
+                if (!line.varianteId) {
+                  continue;
+                }
+
                 await tx.produitVariante.update({
                   where: {
                     id: line.varianteId,
@@ -2878,7 +3262,9 @@ const createSale = async (req, res) => {
                   quantite: -Math.abs(line.quantite),
                   type: "SALE",
                   reason: normalizeOptionalString(
-                    `Sale ${createdSale.numeroTicket} - ${getVariantLabel(line.variant)}`
+                    line.variant
+                      ? `Sale ${createdSale.numeroTicket} - ${getVariantLabel(line.variant)}`
+                      : `Sale ${createdSale.numeroTicket} - ${line.productName}`
                   ),
                 })),
               });
@@ -3650,7 +4036,7 @@ const createRefund = async (req, res) => {
         product,
         variantsByProductId,
       });
-      const itemKey = buildProductVariantKey(item.productId, variant.id);
+      const itemKey = buildProductVariantKey(item.productId, variant?.id || null);
       let unitPriceValue = item.unitPrice;
 
       if (linkedSale) {
@@ -3679,7 +4065,7 @@ const createRefund = async (req, res) => {
         }
       } else if (unitPriceValue === null || unitPriceValue === undefined) {
         unitPriceValue = decimalToNumber(
-          variant.prixVente ?? product.prixVente ?? product.prixDetail
+          variant?.prixVente ?? product.prixVente ?? product.prixDetail
         );
       }
 
@@ -3689,7 +4075,7 @@ const createRefund = async (req, res) => {
       console.info("REFUND lines", {
         saleId: linkedSale?.id || null,
         productId: item.productId,
-        variantId: variant.id,
+        variantId: variant?.id || null,
         quantity: item.quantity,
         unitPrice: decimalToNumber(lineUnitPrice),
         lineTotal: decimalToNumber(lineTotal),
@@ -3699,7 +4085,7 @@ const createRefund = async (req, res) => {
       lignesData.push({
         organisationId,
         produitId: item.productId,
-        varianteId: variant.id,
+        varianteId: variant?.id || null,
         quantite: item.quantity,
         prixUnitaire: lineUnitPrice.mul(-1),
         sousTotal: lineTotal.mul(-1),
@@ -3721,7 +4107,7 @@ const createRefund = async (req, res) => {
           numero,
           venteId: linkedSale?.id || null,
           produitId: item.productId,
-          varianteId: variant.id,
+          varianteId: variant?.id || null,
           quantite: item.quantity,
           montant: lineTotal,
           raison: reason,
@@ -3731,17 +4117,20 @@ const createRefund = async (req, res) => {
       await restoreStockForProduct(tx, {
         organisationId,
         productId: item.productId,
-        variantId: variant.id,
+        variantId: variant?.id || null,
         storeId,
         quantity: item.quantity,
         type: "RETURN",
         reason:
-          reason || `Remboursement ${numero} - ${product.nom} / ${getVariantLabel(variant)}`,
+          reason ||
+          (variant
+            ? `Remboursement ${numero} - ${product.nom} / ${getVariantLabel(variant)}`
+            : `Remboursement ${numero} - ${product.nom}`),
       });
 
       console.info("REFUND stock increased", {
         productId: item.productId,
-        variantId: variant.id,
+        variantId: variant?.id || null,
         storeId,
         quantity: item.quantity,
       });

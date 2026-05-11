@@ -465,12 +465,21 @@ const productInclude = {
   variantes: {
     orderBy: [{ id: "asc" }],
   },
+  stocks: {
+    select: {
+      quantite: true,
+    },
+  },
 };
+
+const sumProductStocks = (stocks = []) =>
+  stocks.reduce((total, stock) => total + Number(stock?.quantite || 0), 0);
 
 const mapProductToResponse = (product) => {
   const variants = (product.variantes || []).map((variant) =>
     toApiVariant(variant, product)
   );
+  const stockFromRows = Array.isArray(product.stocks) ? sumProductStocks(product.stocks) : null;
 
   return {
     id: product.id,
@@ -490,7 +499,7 @@ const mapProductToResponse = (product) => {
     supplierName:
       product.fournisseur?.compte?.nom || product.fournisseur?.nom || null,
     active: product.estActif,
-    stock: sumVariantStock(variants),
+    stock: stockFromRows === null ? sumVariantStock(variants) : stockFromRows,
     hasMultipleVariants: variants.filter((variant) => variant.active).length > 1,
     variants,
   };
@@ -951,13 +960,16 @@ const createProduct = async (req, res) => {
       normalizedCodeBarres = null;
     }
 
-    const normalizedVariants = normalizeVariantsInput({
-      variants,
-      defaultPurchasePrice: parsedPrixAchat,
-      defaultSalePrice: parsedPrixDetail,
-      defaultThreshold: parsedSeuilMinimum,
-      initialQuantity: totalInitialQuantity,
-    });
+    const normalizedVariants =
+      Array.isArray(variants) && variants.length > 0
+        ? normalizeVariantsInput({
+            variants,
+            defaultPurchasePrice: parsedPrixAchat,
+            defaultSalePrice: parsedPrixDetail,
+            defaultThreshold: parsedSeuilMinimum,
+            initialQuantity: totalInitialQuantity,
+          })
+        : [];
     await ensureUniqueVariantBarcodes(organisationId, normalizedVariants);
 
     if (parsedFournisseurId) {
@@ -1040,32 +1052,37 @@ const createProduct = async (req, res) => {
         },
       });
 
-      await tx.produitVariante.createMany({
-        data: normalizedVariants.map((variant) => ({
-          organisationId,
-          produitId: produitCree.id,
-          taille: variant.taille,
-          couleur: variant.couleur,
-          valeursVariante: variant.valeursVariante,
-          codeBarres: variant.codeBarres,
-          prixAchat: variant.prixAchat,
-          prixVente: variant.prixVente,
-          quantiteStock: variant.quantiteStock,
-          seuilMinimum: variant.seuilMinimum,
-          actif: variant.actif,
-        })),
-      });
+      if (normalizedVariants.length > 0) {
+        await tx.produitVariante.createMany({
+          data: normalizedVariants.map((variant) => ({
+            organisationId,
+            produitId: produitCree.id,
+            taille: variant.taille,
+            couleur: variant.couleur,
+            valeursVariante: variant.valeursVariante,
+            codeBarres: variant.codeBarres,
+            prixAchat: variant.prixAchat,
+            prixVente: variant.prixVente,
+            quantiteStock: variant.quantiteStock,
+            seuilMinimum: variant.seuilMinimum,
+            actif: variant.actif,
+          })),
+        });
+      }
 
-      const totalVariantStock = normalizedVariants.reduce(
-        (sum, variant) => sum + Number(variant.quantiteStock || 0),
-        0
-      );
+      const totalStockToSync =
+        normalizedVariants.length > 0
+          ? normalizedVariants.reduce(
+              (sum, variant) => sum + Number(variant.quantiteStock || 0),
+              0
+            )
+          : totalInitialQuantity;
       const quantityByStoreId = new Map(
         pointsDeVente.map((pointDeVente) => [pointDeVente.id, 0])
       );
 
       if (pointsDeVente[0]) {
-        quantityByStoreId.set(pointsDeVente[0].id, totalVariantStock);
+        quantityByStoreId.set(pointsDeVente[0].id, totalStockToSync);
       }
 
       await syncAggregateProductStock(
@@ -1318,25 +1335,27 @@ const updateProduct = async (req, res) => {
     const nextVariantsInput =
       variants === undefined
         ? null
-        : normalizeVariantsInput({
-            variants,
-            defaultPurchasePrice:
-              data.prixAchat !== undefined
-                ? data.prixAchat
-                : decimalToNumber(existingProduct.prixAchat),
-            defaultSalePrice:
-              data.prixDetail !== undefined
-                ? data.prixDetail
-                : decimalToNumber(existingProduct.prixDetail),
-            defaultThreshold:
-              data.seuilMinimum !== undefined
-                ? data.seuilMinimum
-                : Number(existingProduct.seuilMinimum || 0),
-            initialQuantity: existingProduct.variantes.reduce(
-              (sum, variant) => sum + Number(variant.quantiteStock || 0),
-              0
-            ),
-          });
+        : variants.length === 0
+          ? []
+          : normalizeVariantsInput({
+              variants,
+              defaultPurchasePrice:
+                data.prixAchat !== undefined
+                  ? data.prixAchat
+                  : decimalToNumber(existingProduct.prixAchat),
+              defaultSalePrice:
+                data.prixDetail !== undefined
+                  ? data.prixDetail
+                  : decimalToNumber(existingProduct.prixDetail),
+              defaultThreshold:
+                data.seuilMinimum !== undefined
+                  ? data.seuilMinimum
+                  : Number(existingProduct.seuilMinimum || 0),
+              initialQuantity: existingProduct.variantes.reduce(
+                (sum, variant) => sum + Number(variant.quantiteStock || 0),
+                0
+              ),
+            });
     const nextVariants = nextVariantsInput;
 
     if (nextVariants) {
@@ -1440,30 +1459,33 @@ const updateProduct = async (req, res) => {
           where: {
             organisationId,
             produitId: productId,
+            actif: true,
           },
           orderBy: [{ id: "asc" }],
         }),
       ]);
 
-      const totalVariantStock = variantsAfterUpdate.reduce(
-        (sum, variant) => sum + Number(variant.quantiteStock || 0),
-        0
-      );
-      const quantityByStoreId = new Map(
-        pointsDeVente.map((pointDeVente) => [pointDeVente.id, 0])
-      );
+      if (variantsAfterUpdate.length > 0) {
+        const totalVariantStock = variantsAfterUpdate.reduce(
+          (sum, variant) => sum + Number(variant.quantiteStock || 0),
+          0
+        );
+        const quantityByStoreId = new Map(
+          pointsDeVente.map((pointDeVente) => [pointDeVente.id, 0])
+        );
 
-      if (pointsDeVente[0]) {
-        quantityByStoreId.set(pointsDeVente[0].id, totalVariantStock);
+        if (pointsDeVente[0]) {
+          quantityByStoreId.set(pointsDeVente[0].id, totalVariantStock);
+        }
+
+        await syncAggregateProductStock(
+          tx,
+          organisationId,
+          productId,
+          pointsDeVente,
+          quantityByStoreId
+        );
       }
-
-      await syncAggregateProductStock(
-        tx,
-        organisationId,
-        productId,
-        pointsDeVente,
-        quantityByStoreId
-      );
 
       return tx.produit.findUnique({
         where: { id: productId },
