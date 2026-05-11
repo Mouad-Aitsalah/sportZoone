@@ -540,6 +540,20 @@ const getStockStatusMeta = (quantity, minimumThreshold) => {
 
 const toApiStock = (stock, options = {}) => {
   const { includeFinancialFields = true } = options;
+  const resolvedVariantId = stock.variantId ?? stock.varianteId ?? stock.variante?.id ?? null;
+  const productBarcode = normalizeRequiredString(
+    stock.productBarcode ??
+      stock.codeBarresProduit ??
+      stock.produit?.codeBarres ??
+      stock.product?.codeBarres
+  );
+  const variantBarcode = normalizeRequiredString(
+    stock.variantBarcode ??
+      stock.codeBarresVariante ??
+      stock.variante?.codeBarres ??
+      stock.variant?.codeBarres
+  );
+  const resolvedBarcode = normalizeRequiredString(stock.barcode) || variantBarcode || productBarcode;
   const minimumThreshold =
     stock.minimumThreshold ??
     stock.variante?.seuilMinimum ??
@@ -552,18 +566,31 @@ const toApiStock = (stock, options = {}) => {
     stock.variante?.prixAchat ??
     stock.produit?.prixAchat ??
     0;
+  const salePrice =
+    stock.salePrice ??
+    stock.variante?.prixVente ??
+    stock.produit?.prixVente ??
+    stock.produit?.prixDetail ??
+    0;
   const statusMeta = getStockStatusMeta(quantity, minimumThreshold);
-  const variantSize = stock.variantSize ?? getVariantSize(stock.variante);
-  const variantColor = stock.variantColor ?? getVariantColor(stock.variante);
+  const variantSize =
+    stock.variantSize ?? getVariantSize(stock.variante) ?? (resolvedVariantId ? null : "Unique");
+  const variantColor =
+    stock.variantColor ??
+    getVariantColor(stock.variante) ??
+    (resolvedVariantId ? null : "Standard");
   const variantLabel =
-    stock.variantLabel ?? (stock.variante ? getVariantLabel(stock.variante) : null);
+    stock.variantLabel ??
+    (stock.variante ? getVariantLabel(stock.variante) : null) ??
+    (resolvedVariantId ? null : "Sans variante");
+  const productName = stock.productName ?? stock.produit?.nom ?? "";
 
   const apiStock = {
     id: stock.id,
     productId: stock.productId ?? stock.produitId,
-    productName: stock.productName ?? stock.produit?.nom ?? "",
+    productName,
     category: stock.category ?? stock.produit?.categorie ?? "",
-    variantId: stock.variantId ?? stock.varianteId ?? stock.variante?.id ?? null,
+    variantId: resolvedVariantId,
     variantSize,
     variantColor,
     variantLabel,
@@ -575,14 +602,47 @@ const toApiStock = (stock, options = {}) => {
       stock.valeursVariante ??
       stock.variante?.valeursVariante ??
       variantLabel,
-    barcode: stock.barcode ?? stock.produit?.codeBarres ?? "",
+    barcode: resolvedBarcode,
+    codeBarres: resolvedBarcode,
+    productBarcode,
+    variantBarcode,
     storeId: stock.storeId ?? stock.pointDeVenteId,
     storeName: stock.storeName ?? stock.pointDeVente?.nom ?? "",
     quantity,
     minimumThreshold,
+    salePrice: decimalToNumber(salePrice),
+    prixVente: decimalToNumber(salePrice),
     status: statusMeta.status,
     isLowStock: statusMeta.isLowStock,
     severity: statusMeta.severity,
+    product: {
+      id: stock.productId ?? stock.produitId,
+      name: productName,
+      codeBarres: productBarcode || resolvedBarcode || "",
+    },
+    produit: {
+      id: stock.productId ?? stock.produitId,
+      nom: productName,
+      codeBarres: productBarcode || resolvedBarcode || "",
+    },
+    variant: resolvedVariantId
+      ? {
+          id: resolvedVariantId,
+          label: variantLabel,
+          codeBarres: variantBarcode || "",
+          taille: variantSize,
+          couleur: variantColor,
+        }
+      : null,
+    variante: resolvedVariantId
+      ? {
+          id: resolvedVariantId,
+          label: variantLabel,
+          codeBarres: variantBarcode || "",
+          taille: variantSize,
+          couleur: variantColor,
+        }
+      : null,
   };
 
   if (includeFinancialFields) {
@@ -2116,6 +2176,8 @@ const getStocks = async (req, res) => {
             categorie: true,
             seuilMinimum: true,
             prixAchat: true,
+            prixVente: true,
+            prixDetail: true,
           },
         },
       },
@@ -2138,6 +2200,8 @@ const getStocks = async (req, res) => {
         categorie: true,
         seuilMinimum: true,
         prixAchat: true,
+        prixVente: true,
+        prixDetail: true,
         stocks: {
           where: store?.id
             ? {
@@ -2180,10 +2244,12 @@ const getStocks = async (req, res) => {
       variantLabel: null,
       category: product.categorie || "",
       barcode: product.codeBarres || "",
+      productBarcode: product.codeBarres || "",
       storeId: stockRow?.pointDeVenteId ?? store?.id ?? null,
       storeName: stockRow?.pointDeVente?.nom || store?.nom || "",
       quantity: Number(stockRow?.quantite || 0),
       purchasePrice: product.prixAchat ?? 0,
+      salePrice: product.prixVente ?? product.prixDetail ?? 0,
       minimumThreshold: product.seuilMinimum ?? 0,
     }, { includeFinancialFields });
   });
@@ -2198,6 +2264,8 @@ const getStocks = async (req, res) => {
       variantColor: getVariantColor(variant),
       variantLabel: getVariantLabel(variant),
       barcode: variant.codeBarres || variant.produit?.codeBarres || "",
+      productBarcode: variant.produit?.codeBarres || "",
+      variantBarcode: variant.codeBarres || "",
       storeId: store?.id || null,
       storeName: store?.nom || "",
       quantity: variant.quantiteStock,
@@ -2205,6 +2273,10 @@ const getStocks = async (req, res) => {
         variant.prixAchat === null || variant.prixAchat === undefined
           ? variant.produit?.prixAchat ?? 0
           : variant.prixAchat,
+      salePrice:
+        variant.prixVente === null || variant.prixVente === undefined
+          ? variant.produit?.prixVente ?? variant.produit?.prixDetail ?? 0
+          : variant.prixVente,
       minimumThreshold: variant.seuilMinimum ?? variant.produit?.seuilMinimum ?? 0,
     }, { includeFinancialFields })
   ), ...simpleProductRows];

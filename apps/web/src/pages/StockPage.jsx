@@ -45,6 +45,8 @@ const formatCompactCount = (value) =>
     maximumFractionDigits: 0,
   }).format(Number(value || 0));
 
+const normalizeSearchField = (value) => String(value || "").trim().toLowerCase();
+
 const normalizeStocksPayload = (payload) => {
   if (Array.isArray(payload)) {
     return {
@@ -166,16 +168,29 @@ function StockPage() {
 
   const filteredStocks = useMemo(
     () => {
+      const query = normalizeSearchField(searchTerm);
       const filteredItems = stocks.filter((item) => {
-        const query = searchTerm.trim().toLowerCase();
         return (
           !query ||
-          item.productName?.toLowerCase().includes(query) ||
-          item.category?.toLowerCase().includes(query) ||
-          item.barcode?.toLowerCase().includes(query) ||
-          item.variantLabel?.toLowerCase().includes(query) ||
-          item.variantSize?.toLowerCase().includes(query) ||
-          item.variantColor?.toLowerCase().includes(query)
+          [
+            item.productName,
+            item.category,
+            item.barcode,
+            item.codeBarres,
+            item.productBarcode,
+            item.variantBarcode,
+            item.product?.codeBarres,
+            item.produit?.codeBarres,
+            item.variant?.codeBarres,
+            item.variante?.codeBarres,
+            item.product?.name,
+            item.produit?.nom,
+            item.variantLabel,
+            item.variantSize,
+            item.variantColor,
+            item.variante?.label,
+            item.variant?.label,
+          ].some((fieldValue) => normalizeSearchField(fieldValue).includes(query))
         );
       });
 
