@@ -85,8 +85,6 @@ export const cacheResources = {
       fetcher: async () => {
         const response = await api.getProducts({
           params: {
-            page: 1,
-            limit: 500,
             includePagination: false,
           },
         });

@@ -1696,11 +1696,91 @@ const getProducts = async (req, res) => {
   const timerLabel = createTimerLabel("GET /api/products");
   console.time(timerLabel);
   const organisationId = getOrganisationIdFromUser(req.user);
+  const searchQuery = normalizeOptionalString(req.query.search);
   const productView = normalizeOptionalString(req.query.view)?.toLowerCase() || "default";
   const includeSalesStats =
     productView !== "pos" && String(req.query.includeSalesStats || "").toLowerCase() !== "false";
   const includePagination = String(req.query.includePagination || "").toLowerCase() !== "false";
   const { page, limit, skip } = getPaginationParams(req.query);
+  const productWhere = {
+    organisationId,
+    ...(searchQuery
+      ? {
+          OR: [
+            {
+              nom: {
+                contains: searchQuery,
+                mode: "insensitive",
+              },
+            },
+            {
+              codeBarres: {
+                contains: searchQuery,
+                mode: "insensitive",
+              },
+            },
+            {
+              categorie: {
+                contains: searchQuery,
+                mode: "insensitive",
+              },
+            },
+            {
+              fournisseur: {
+                OR: [
+                  {
+                    nom: {
+                      contains: searchQuery,
+                      mode: "insensitive",
+                    },
+                  },
+                  {
+                    compte: {
+                      nom: {
+                        contains: searchQuery,
+                        mode: "insensitive",
+                      },
+                    },
+                  },
+                ],
+              },
+            },
+            {
+              variantes: {
+                some: {
+                  OR: [
+                    {
+                      codeBarres: {
+                        contains: searchQuery,
+                        mode: "insensitive",
+                      },
+                    },
+                    {
+                      taille: {
+                        contains: searchQuery,
+                        mode: "insensitive",
+                      },
+                    },
+                    {
+                      couleur: {
+                        contains: searchQuery,
+                        mode: "insensitive",
+                      },
+                    },
+                    {
+                      valeursVariante: {
+                        contains: searchQuery,
+                        mode: "insensitive",
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          ],
+        }
+      : {}),
+  };
   const productSelect = {
     id: true,
     nom: true,
@@ -1765,21 +1845,21 @@ const getProducts = async (req, res) => {
     const [total, products, stats] = await Promise.all([
       includePagination
         ? prisma.produit.count({
-            where: {
-              organisationId,
-            },
+            where: productWhere,
           })
         : Promise.resolve(null),
       prisma.produit.findMany({
-        where: {
-          organisationId,
-        },
+        where: productWhere,
         select: productSelect,
         orderBy: {
           id: "desc",
         },
-        skip,
-        take: limit,
+        ...(includePagination
+          ? {
+              skip,
+              take: limit,
+            }
+          : {}),
       }),
       buildProductsStats(organisationId),
     ]);
@@ -1865,6 +1945,7 @@ const getProducts = async (req, res) => {
       organisationId,
       page,
       limit,
+      search: searchQuery,
       view: productView,
       includeSalesStats,
       includePagination,
