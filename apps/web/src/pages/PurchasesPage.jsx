@@ -5,19 +5,32 @@ import Modal from "../components/Modal";
 import PageHeader from "../components/PageHeader";
 import SectionCard from "../components/SectionCard";
 import api from "../services/api";
+import { invalidateDomainCaches } from "../utils/appCache";
 import { formatCurrencyDh } from "../utils/formatters";
 
 const getTodayString = () => new Date().toISOString().slice(0, 10);
 
 const createProductLookupLabel = (product) =>
-  [product.barcode, product.name].filter(Boolean).join(" - ");
+  [product.barcode, product.displayName || product.name].filter(Boolean).join(" - ");
+
+const buildVariantLabel = (variant) => {
+  const values = String(variant?.valeursVariante || "").trim();
+
+  if (values) {
+    return values;
+  }
+
+  return [variant?.taille, variant?.couleur].filter(Boolean).join(" / ");
+};
 
 const createEmptyPurchaseLine = () => ({
   rowId: `purchase-line-${Date.now()}-${Math.random().toString(16).slice(2)}`,
   productId: "",
+  variantId: "",
   productLookup: "",
   productCode: "",
   productName: "",
+  variantLabel: "",
   category: "",
   quantity: "1",
   prixAchat: "",
@@ -60,16 +73,47 @@ const normalizeSupplier = (supplier) => ({
   accountNumber: supplier?.accountNumber || supplier?.numeroCompte || "",
 });
 
-const normalizeProduct = (product) => ({
-  id: Number(product?.id),
-  name: product?.name || product?.nom || "Produit",
-  barcode: product?.barcode || product?.codeBarres || "",
-  category: product?.category || product?.categorie || "",
-  purchasePrice: Number(product?.purchasePrice ?? product?.prixAchat ?? 0),
-  retailPrice: Number(
-    product?.retailPrice ?? product?.prixDetail ?? product?.salePrice ?? product?.prixVente ?? 0
-  ),
-});
+const normalizeProductEntries = (product) => {
+  const baseProduct = {
+    id: Number(product?.id),
+    name: product?.name || product?.nom || "Produit",
+    barcode: product?.barcode || product?.codeBarres || "",
+    category: product?.category || product?.categorie || "",
+    purchasePrice: Number(product?.purchasePrice ?? product?.prixAchat ?? 0),
+    retailPrice: Number(
+      product?.retailPrice ?? product?.prixDetail ?? product?.salePrice ?? product?.prixVente ?? 0
+    ),
+  };
+  const variants = Array.isArray(product?.variantes) ? product.variantes : [];
+  const activeVariants = variants.filter((variant) => variant?.actif !== false);
+
+  if (!activeVariants.length) {
+    return [
+      {
+        ...baseProduct,
+        variantId: null,
+        variantLabel: "",
+        displayName: baseProduct.name,
+      },
+    ];
+  }
+
+  return activeVariants.map((variant) => {
+    const variantLabel = buildVariantLabel(variant) || "Sans variante";
+
+    return {
+      ...baseProduct,
+      variantId: Number(variant?.id),
+      variantLabel,
+      displayName: `${baseProduct.name} - ${variantLabel}`,
+      barcode: variant?.codeBarres || baseProduct.barcode,
+      purchasePrice: Number(variant?.prixAchat ?? baseProduct.purchasePrice),
+      retailPrice: Number(
+        variant?.prixVente ?? variant?.prixDetail ?? baseProduct.retailPrice
+      ),
+    };
+  });
+};
 
 const normalizeStore = (store) => ({
   id: Number(store?.id),
@@ -148,7 +192,10 @@ const findProductByLookup = (lookupValue, products) => {
   return (
     products.find((product) => createProductLookupLabel(product).toLowerCase() === normalizedLookup) ||
     products.find((product) => String(product.barcode || "").toLowerCase() === normalizedLookup) ||
-    products.find((product) => String(product.name || "").toLowerCase() === normalizedLookup)
+    products.find(
+      (product) =>
+        String(product.displayName || product.name || "").toLowerCase() === normalizedLookup
+    )
   );
 };
 
@@ -169,7 +216,7 @@ function PurchasesPage() {
   const productLookupOptions = useMemo(
     () =>
       products.map((product) => ({
-        id: product.id,
+        id: `${product.id}-${product.variantId || "simple"}`,
         label: createProductLookupLabel(product),
       })),
     [products]
@@ -193,7 +240,7 @@ function PurchasesPage() {
           await Promise.allSettled([
             fetchPurchases(),
             api.getSupplierAccounts(),
-            api.getProducts(),
+            api.getProducts({ params: { includePagination: false } }),
             api.getStores(),
           ]);
 
@@ -211,7 +258,9 @@ function PurchasesPage() {
             : [];
         const productsList =
           productsResult.status === "fulfilled"
-            ? getCollection(productsResult.value.data, ["data", "products"]).map(normalizeProduct)
+            ? getCollection(productsResult.value.data, ["data", "products"]).flatMap(
+                normalizeProductEntries
+              )
             : [];
         const storesList =
           storesResult.status === "fulfilled"
@@ -339,9 +388,11 @@ function PurchasesPage() {
         return {
           ...line,
           productId: String(product.id),
+          variantId: product.variantId ? String(product.variantId) : "",
           productLookup: createProductLookupLabel(product),
           productCode: product.barcode,
-          productName: product.name,
+          productName: product.displayName || product.name,
+          variantLabel: product.variantLabel || "",
           category: product.category,
           prixAchat: String(product.purchasePrice || 0),
           prixDetail: String(product.retailPrice || 0),
@@ -430,18 +481,20 @@ function PurchasesPage() {
       return "Au moins une ligne produit est obligatoire.";
     }
 
-    const productIds = new Set();
+    const productKeys = new Set();
 
     for (const line of purchaseFormData.lignes) {
       if (!line.productId) {
         return "Chaque ligne doit contenir un produit valide.";
       }
 
-      if (productIds.has(line.productId)) {
-        return "Chaque produit ne peut apparaitre qu'une seule fois dans l'achat.";
+      const lineKey = `${line.productId}:${line.variantId || "simple"}`;
+
+      if (productKeys.has(lineKey)) {
+        return "Chaque produit ou variante ne peut apparaitre qu'une seule fois dans l'achat.";
       }
 
-      productIds.add(line.productId);
+      productKeys.add(lineKey);
 
       if (!Number.isFinite(Number(line.quantity)) || Number(line.quantity) <= 0) {
         return "La quantite achetee doit etre superieure a 0.";
@@ -494,6 +547,7 @@ function PurchasesPage() {
       pointDeVenteId: Number(purchaseFormData.pointDeVenteId),
       lignes: purchaseFormData.lignes.map((line) => ({
         produitId: Number(line.productId),
+        varianteId: line.variantId ? Number(line.variantId) : null,
         quantite: Number(line.quantity),
         prixAchatUnitaireHT: Number(line.prixAchat),
         prixDetail: Number(line.prixDetail),
@@ -506,6 +560,7 @@ function PurchasesPage() {
       const response = await api.createPurchase(payload);
       const createdPurchase = normalizePurchase(response.data?.data || response.data);
       const refreshedPurchases = await fetchPurchases();
+      invalidateDomainCaches("stock:", "stock-alerts", "products:");
 
       setPurchases(refreshedPurchases);
       setNotice({

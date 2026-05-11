@@ -51,20 +51,29 @@ const parseDateInput = (value, fieldLabel, { required = false } = {}) => {
   return parsedDate;
 };
 
+const buildPurchaseLineKey = (produitId, varianteId = null) =>
+  `${produitId}:${varianteId ? Number(varianteId) : "simple"}`;
+
 const ensureUniqueLineProducts = (lignes) => {
-  const duplicateProductIds = lignes.reduce((duplicates, ligne, index, source) => {
-    if (source.findIndex((entry) => entry.produitId === ligne.produitId) !== index) {
-      duplicates.add(ligne.produitId);
+  const duplicateLineKeys = lignes.reduce((duplicates, ligne, index, source) => {
+    const lineKey = buildPurchaseLineKey(ligne.produitId, ligne.varianteId);
+
+    if (
+      source.findIndex(
+        (entry) => buildPurchaseLineKey(entry.produitId, entry.varianteId) === lineKey
+      ) !== index
+    ) {
+      duplicates.add(lineKey);
     }
 
     return duplicates;
   }, new Set());
 
-  if (duplicateProductIds.size > 0) {
+  if (duplicateLineKeys.size > 0) {
     throw createHttpError(
       400,
-      `Chaque produit doit apparaitre une seule fois dans l'achat. Produits en doublon: ${Array.from(
-        duplicateProductIds
+      `Chaque produit ou variante doit apparaitre une seule fois dans l'achat. Lignes en doublon: ${Array.from(
+        duplicateLineKeys
       ).join(", ")}.`
     );
   }
@@ -93,6 +102,7 @@ const normalizePurchasePayload = (body) => {
     pointDeVenteId: body?.pointDeVenteId ?? body?.storeId,
     lignes: rawLines.map((ligne) => ({
       produitId: ligne?.produitId ?? ligne?.productId,
+      varianteId: ligne?.varianteId ?? ligne?.variantId,
       quantite: ligne?.quantite ?? ligne?.quantity,
       prixAchatUnitaireHT:
         ligne?.prixAchatUnitaireHT ??
@@ -173,6 +183,8 @@ const toApiPurchaseLine = (ligne) => ({
   id: ligne.id,
   produitId: ligne.produitId,
   productId: ligne.produitId,
+  varianteId: ligne.varianteId ?? null,
+  variantId: ligne.varianteId ?? null,
   produitNom: ligne.produit?.nom || null,
   productName: ligne.produit?.nom || null,
   quantite: ligne.quantite,
@@ -295,6 +307,14 @@ const validateProductsForPurchase = async (
       fournisseurId: true,
       prixVente: true,
       prixDetail: true,
+      variantes: {
+        select: {
+          id: true,
+          actif: true,
+          prixAchat: true,
+          prixVente: true,
+        },
+      },
     },
   });
 
@@ -324,39 +344,116 @@ const validateProductsForPurchase = async (
         `Le produit ${product.nom} n'appartient pas au fournisseur selectionne.`
       );
     }
+
+    if (ligne.varianteId) {
+      const variant = (product.variantes || []).find(
+        (entry) => entry.id === ligne.varianteId
+      );
+
+      if (!variant) {
+        throw createHttpError(
+          404,
+          `La variante ${ligne.varianteId} est introuvable pour le produit ${product.nom}.`
+        );
+      }
+
+      if (!variant.actif) {
+        throw createHttpError(
+          400,
+          `La variante ${ligne.varianteId} du produit ${product.nom} est inactive.`
+        );
+      }
+    }
   }
 
   return productsById;
 };
 
 const assertStocksCanBeReduced = async (tx, organisationId, pointDeVenteId, lignes) => {
-  const productIds = [...new Set(lignes.map((ligne) => ligne.produitId))];
-  const stocks = await tx.stock.findMany({
-    where: {
-      organisationId,
-      pointDeVenteId,
-      produitId: {
-        in: productIds,
-      },
-    },
-    select: {
-      produitId: true,
-      quantite: true,
-    },
-  });
+  const simpleLines = lignes.filter((ligne) => !ligne.varianteId);
+  const variantLines = lignes.filter((ligne) => Number.isInteger(ligne.varianteId));
+  const productIds = [...new Set(simpleLines.map((ligne) => ligne.produitId))];
+  const stocks =
+    productIds.length > 0
+      ? await tx.stock.findMany({
+          where: {
+            organisationId,
+            pointDeVenteId,
+            produitId: {
+              in: productIds,
+            },
+          },
+          select: {
+            produitId: true,
+            quantite: true,
+          },
+        })
+      : [];
+  const variantIds = [...new Set(variantLines.map((ligne) => ligne.varianteId))];
+  const variants =
+    variantIds.length > 0
+      ? await tx.produitVariante.findMany({
+          where: {
+            organisationId,
+            id: {
+              in: variantIds,
+            },
+          },
+          select: {
+            id: true,
+            quantiteStock: true,
+          },
+        })
+      : [];
 
   const stockByProductId = new Map(stocks.map((stock) => [stock.produitId, stock.quantite]));
+  const stockByVariantId = new Map(variants.map((variant) => [variant.id, variant.quantiteStock]));
 
   for (const ligne of lignes) {
-    const currentQuantity = stockByProductId.get(ligne.produitId) || 0;
+    const currentQuantity = ligne.varianteId
+      ? stockByVariantId.get(ligne.varianteId) || 0
+      : stockByProductId.get(ligne.produitId) || 0;
 
     if (currentQuantity < ligne.quantite) {
       throw createHttpError(
         409,
-        `Impossible de modifier cet achat car le stock du produit ${ligne.produitId} est insuffisant pour annuler la quantite precedente.`
+        ligne.varianteId
+          ? `Impossible de modifier cet achat car le stock de la variante ${ligne.varianteId} est insuffisant pour annuler la quantite precedente.`
+          : `Impossible de modifier cet achat car le stock du produit ${ligne.produitId} est insuffisant pour annuler la quantite precedente.`
       );
     }
   }
+};
+
+const syncAggregateStockForProduct = async (tx, organisationId, produitId, pointDeVenteId) => {
+  const variantAggregate = await tx.produitVariante.aggregate({
+    where: {
+      organisationId,
+      produitId,
+    },
+    _sum: {
+      quantiteStock: true,
+    },
+  });
+
+  await tx.stock.upsert({
+    where: {
+      organisationId_produitId_pointDeVenteId: {
+        organisationId,
+        produitId,
+        pointDeVenteId,
+      },
+    },
+    update: {
+      quantite: Number(variantAggregate._sum.quantiteStock || 0),
+    },
+    create: {
+      organisationId,
+      produitId,
+      pointDeVenteId,
+      quantite: Number(variantAggregate._sum.quantiteStock || 0),
+    },
+  });
 };
 
 const incrementStocksForLines = async (
@@ -367,26 +464,41 @@ const incrementStocksForLines = async (
   reason
 ) => {
   for (const ligne of lignes) {
-    await tx.stock.upsert({
-      where: {
-        organisationId_produitId_pointDeVenteId: {
+    if (ligne.varianteId) {
+      await tx.produitVariante.update({
+        where: {
+          id: ligne.varianteId,
+        },
+        data: {
+          quantiteStock: {
+            increment: ligne.quantite,
+          },
+        },
+      });
+
+      await syncAggregateStockForProduct(tx, organisationId, ligne.produitId, pointDeVenteId);
+    } else {
+      await tx.stock.upsert({
+        where: {
+          organisationId_produitId_pointDeVenteId: {
+            organisationId,
+            produitId: ligne.produitId,
+            pointDeVenteId,
+          },
+        },
+        update: {
+          quantite: {
+            increment: ligne.quantite,
+          },
+        },
+        create: {
           organisationId,
           produitId: ligne.produitId,
           pointDeVenteId,
+          quantite: ligne.quantite,
         },
-      },
-      update: {
-        quantite: {
-          increment: ligne.quantite,
-        },
-      },
-      create: {
-        organisationId,
-        produitId: ligne.produitId,
-        pointDeVenteId,
-        quantite: ligne.quantite,
-      },
-    });
+      });
+    }
 
     await tx.stockMovement.create({
       data: {
@@ -411,20 +523,35 @@ const decrementStocksForLines = async (
   await assertStocksCanBeReduced(tx, organisationId, pointDeVenteId, lignes);
 
   for (const ligne of lignes) {
-    await tx.stock.update({
-      where: {
-        organisationId_produitId_pointDeVenteId: {
-          organisationId,
-          produitId: ligne.produitId,
-          pointDeVenteId,
+    if (ligne.varianteId) {
+      await tx.produitVariante.update({
+        where: {
+          id: ligne.varianteId,
         },
-      },
-      data: {
-        quantite: {
-          decrement: ligne.quantite,
+        data: {
+          quantiteStock: {
+            decrement: ligne.quantite,
+          },
         },
-      },
-    });
+      });
+
+      await syncAggregateStockForProduct(tx, organisationId, ligne.produitId, pointDeVenteId);
+    } else {
+      await tx.stock.update({
+        where: {
+          organisationId_produitId_pointDeVenteId: {
+            organisationId,
+            produitId: ligne.produitId,
+            pointDeVenteId,
+          },
+        },
+        data: {
+          quantite: {
+            decrement: ligne.quantite,
+          },
+        },
+      });
+    }
 
     await tx.stockMovement.create({
       data: {
@@ -482,6 +609,7 @@ const createOrUpdatePurchase = async ({
     return {
       organisationId,
       produitId: ligne.produitId,
+      varianteId: ligne.varianteId || null,
       quantite: ligne.quantite,
       ...amounts,
     };
@@ -507,6 +635,7 @@ const createOrUpdatePurchase = async ({
       existingPurchase.pointDeVenteId,
       existingPurchase.lignes.map((ligne) => ({
         produitId: ligne.produitId,
+        varianteId: ligne.varianteId || null,
         quantite: ligne.quantite,
       })),
       `Annulation des quantites de l'achat ${existingPurchase.numeroAchat} avant mise a jour`
@@ -520,16 +649,28 @@ const createOrUpdatePurchase = async ({
   }
 
   for (const ligne of normalizedLines) {
-    await tx.produit.update({
-      where: {
-        id: ligne.produitId,
-      },
-      data: {
-        prixAchat: ligne.prixAchatUnitaireHT,
-        prixVente: ligne.prixDetail,
-        prixDetail: ligne.prixDetail,
-      },
-    });
+    if (ligne.varianteId) {
+      await tx.produitVariante.update({
+        where: {
+          id: ligne.varianteId,
+        },
+        data: {
+          prixAchat: ligne.prixAchatUnitaireHT,
+          prixVente: ligne.prixDetail,
+        },
+      });
+    } else {
+      await tx.produit.update({
+        where: {
+          id: ligne.produitId,
+        },
+        data: {
+          prixAchat: ligne.prixAchatUnitaireHT,
+          prixVente: ligne.prixDetail,
+          prixDetail: ligne.prixDetail,
+        },
+      });
+    }
   }
 
   const numeroAchat =
@@ -624,6 +765,7 @@ const createOrUpdatePurchase = async ({
     store.id,
     normalizedLines.map((ligne) => ({
       produitId: ligne.produitId,
+      varianteId: ligne.varianteId || null,
       quantite: ligne.quantite,
     })),
     `Achat fournisseur ${numeroAchat}`
@@ -789,6 +931,7 @@ const deletePurchase = async (req, res) => {
       purchase.pointDeVenteId,
       purchase.lignes.map((ligne) => ({
         produitId: ligne.produitId,
+        varianteId: ligne.varianteId || null,
         quantite: ligne.quantite,
       })),
       `Suppression de l'achat ${purchase.numeroAchat}`

@@ -114,6 +114,7 @@ const purchaseModeSchema = z
 
 const purchaseLineSchema = z.object({
   produitId: positiveInt("Le produit"),
+  varianteId: optionalPositiveInt("La variante"),
   quantite: positiveInt("La quantite"),
   prixAchatUnitaireHT: nonNegativeNumber("Le prix d'achat HT"),
   prixDetail: nonNegativeNumber("Le prix detail"),
