@@ -793,6 +793,22 @@ const syncAggregateProductStock = async (
   );
 };
 
+const buildQuantityByStoreId = (pointsDeVente = [], entries = []) => {
+  const quantityByStoreId = new Map(
+    pointsDeVente.map((pointDeVente) => [pointDeVente.id, 0])
+  );
+
+  entries.forEach((entry) => {
+    if (!quantityByStoreId.has(entry.storeId)) {
+      return;
+    }
+
+    quantityByStoreId.set(entry.storeId, Number(entry.quantity || 0));
+  });
+
+  return quantityByStoreId;
+};
+
 const getAllProducts = async (req, res) => {
   try {
     const organisationId = getOrganisationIdFromUser(req.user);
@@ -1070,20 +1086,18 @@ const createProduct = async (req, res) => {
         });
       }
 
-      const totalStockToSync =
+      const quantityByStoreId =
         normalizedVariants.length > 0
-          ? normalizedVariants.reduce(
-              (sum, variant) => sum + Number(variant.quantiteStock || 0),
-              0
-            )
-          : totalInitialQuantity;
-      const quantityByStoreId = new Map(
-        pointsDeVente.map((pointDeVente) => [pointDeVente.id, 0])
-      );
-
-      if (pointsDeVente[0]) {
-        quantityByStoreId.set(pointsDeVente[0].id, totalStockToSync);
-      }
+          ? buildQuantityByStoreId(pointsDeVente, [
+              {
+                storeId: pointsDeVente[0]?.id,
+                quantity: normalizedVariants.reduce(
+                  (sum, variant) => sum + Number(variant.quantiteStock || 0),
+                  0
+                ),
+              },
+            ])
+          : buildQuantityByStoreId(pointsDeVente, normalizedInitialStocks);
 
       await syncAggregateProductStock(
         tx,
@@ -1470,13 +1484,12 @@ const updateProduct = async (req, res) => {
           (sum, variant) => sum + Number(variant.quantiteStock || 0),
           0
         );
-        const quantityByStoreId = new Map(
-          pointsDeVente.map((pointDeVente) => [pointDeVente.id, 0])
-        );
-
-        if (pointsDeVente[0]) {
-          quantityByStoreId.set(pointsDeVente[0].id, totalVariantStock);
-        }
+        const quantityByStoreId = buildQuantityByStoreId(pointsDeVente, [
+          {
+            storeId: pointsDeVente[0]?.id,
+            quantity: totalVariantStock,
+          },
+        ]);
 
         await syncAggregateProductStock(
           tx,
@@ -1861,13 +1874,12 @@ const importProducts = async (req, res) => {
           (sum, variant) => sum + Number(variant.quantiteStock || 0),
           0
         );
-        const quantityByStoreId = new Map(
-          pointsDeVente.map((pointDeVente) => [pointDeVente.id, 0])
-        );
-
-        if (pointsDeVente[0]) {
-          quantityByStoreId.set(pointsDeVente[0].id, totalVariantStock);
-        }
+        const quantityByStoreId = buildQuantityByStoreId(pointsDeVente, [
+          {
+            storeId: primaryStore.id,
+            quantity: totalVariantStock,
+          },
+        ]);
 
         await syncAggregateProductStock(
           prisma,

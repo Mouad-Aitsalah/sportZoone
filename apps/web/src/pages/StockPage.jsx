@@ -34,8 +34,7 @@ const createInitialFormData = (mode = "entry", stock = null) => ({
 
 const STOCK_QUERY_PARAMS = {
   params: {
-    page: 1,
-    limit: 500,
+    includePagination: false,
   },
 };
 const STOCK_CACHE_KEY = CACHE_KEYS.stock("inventory");

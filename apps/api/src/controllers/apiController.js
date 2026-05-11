@@ -2073,6 +2073,7 @@ const getProductByBarcode = async (req, res) => {
 const getStocks = async (req, res) => {
   const organisationId = getOrganisationIdFromUser(req.user);
   const employeeStoreId = getEmployeeStoreId(req.user);
+  const includePagination = String(req.query.includePagination || "").toLowerCase() !== "false";
   const { page, limit, skip } = getPaginationParams(req.query);
   const includeFinancialFields = req.user.role === "ADMIN";
   const primaryStore =
@@ -2212,8 +2213,8 @@ const getStocks = async (req, res) => {
     String(left.productName || "").localeCompare(String(right.productName || ""), "fr")
   );
 
-  const total = allStockRows.length;
-  const stocks = allStockRows.slice(skip, skip + limit);
+  const total = includePagination ? allStockRows.length : null;
+  const stocks = includePagination ? allStockRows.slice(skip, skip + limit) : allStockRows;
   const stats = buildStockStatsFromRows(allStockRows);
 
   return res.status(200).json({
