@@ -1278,6 +1278,17 @@ a {
 .pos-page-shell {
   display: grid;
   gap: 18px;
+  min-width: 0;
+}
+
+.pos-main-shell {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 18px;
+  min-width: 0;
+  min-height: 620px;
+  height: min(760px, var(--pos-available-height, 760px));
+  overflow: hidden;
 }
 
 .pos-page-heading {
@@ -1295,8 +1306,57 @@ a {
 
 .pos-layout {
   display: grid;
-  grid-template-columns: 1.15fr 0.95fr;
+  grid-template-columns: minmax(0, 1fr) 520px;
   gap: 18px;
+  align-items: stretch;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.pos-layout > * {
+  min-width: 0;
+  min-height: 0;
+}
+
+.pos-products-panel {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.pos-cart-panel {
+  width: 100%;
+  max-width: 520px;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  justify-self: end;
+}
+
+.pos-products-scroll,
+.pos-cart-scroll {
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  display: grid;
+  align-content: start;
+  gap: 18px;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.pos-cart-scroll .cart-list {
+  max-height: none;
+  overflow: visible;
+  padding-right: 0;
 }
 
 .inline-notice {
@@ -1382,17 +1442,22 @@ a {
   gap: 10px;
   min-height: 148px;
   padding: 14px;
+  min-width: 0;
 }
 
 .pos-quick-product-head {
   display: grid;
   gap: 6px;
+  min-width: 0;
 }
 
 .pos-quick-product-head h3 {
   margin: 0;
   font-size: 15px;
   line-height: 1.35;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .pos-quick-product-head strong {
@@ -1442,17 +1507,28 @@ a {
 }
 
 .cart-item-main {
-  min-width: 180px;
+  min-width: 0;
+  flex: 1 1 180px;
+}
+
+.cart-item-main strong,
+.cart-item-main span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .cart-quantity-controls {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex: 0 0 auto;
+  min-width: 0;
 }
 
 .cart-quantity-input {
   width: 92px;
+  min-width: 0;
   text-align: center;
 }
 
@@ -1463,7 +1539,10 @@ a {
 }
 
 .cart-price-block {
-  min-width: 150px;
+  min-width: 0;
+  width: 150px;
+  max-width: 150px;
+  flex: 0 0 150px;
 }
 
 .cart-price-block span {
@@ -1473,6 +1552,7 @@ a {
 
 .cart-price-input {
   width: 110px;
+  max-width: 100%;
   margin: 6px 0 8px;
 }
 
@@ -1482,6 +1562,29 @@ a {
   margin-top: 18px;
   padding-top: 18px;
   border-top: 1px solid var(--border);
+}
+
+.cart-list {
+  min-width: 0;
+  max-height: min(48vh, 560px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 6px;
+}
+
+.cart-item {
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.cart-item > * {
+  min-width: 0;
+}
+
+.cart-item .table-action-button {
+  flex: 0 0 auto;
+  max-width: 100%;
 }
 
 .summary-row {
@@ -1617,6 +1720,109 @@ a {
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--text-soft);
+}
+
+.pos-refund-modal {
+  width: min(92vw, 1260px);
+  max-width: 96vw;
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.pos-refund-modal-body {
+  display: grid;
+  gap: 18px;
+  overflow: hidden;
+}
+
+.pos-refund-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(180px, 0.7fr) auto;
+  gap: 14px;
+  align-items: end;
+}
+
+.pos-refund-refresh-button {
+  align-self: end;
+}
+
+.pos-refund-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.95fr) minmax(0, 1.45fr);
+  gap: 18px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.pos-refund-sales-list,
+.pos-refund-details {
+  min-height: 0;
+  overflow: auto;
+}
+
+.pos-refund-sales-list {
+  display: grid;
+  gap: 12px;
+  padding-right: 4px;
+}
+
+.pos-refund-sale-card {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--surface);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.pos-refund-sale-card:hover,
+.pos-refund-sale-card:focus-visible {
+  border-color: rgba(38, 109, 246, 0.28);
+  box-shadow: 0 18px 38px rgba(15, 23, 42, 0.08);
+  transform: translateY(-1px);
+}
+
+.pos-refund-sale-card.active {
+  border-color: rgba(38, 109, 246, 0.44);
+  background: rgba(38, 109, 246, 0.05);
+}
+
+.pos-refund-sale-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.pos-refund-details {
+  display: grid;
+  gap: 16px;
+  padding-right: 4px;
+}
+
+.pos-refund-items-list {
+  display: grid;
+  gap: 14px;
+}
+
+.pos-refund-item-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(180px, 0.7fr);
+  gap: 14px;
+  align-items: end;
+}
+
+.pos-refund-form-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.7fr) minmax(0, 1.3fr);
+  gap: 16px;
 }
 
 .stock-alert-modal {
@@ -1799,6 +2005,78 @@ a {
   margin-top: 18px;
 }
 
+.pos-customer-card {
+  display: grid;
+  gap: 8px;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--surface-muted);
+}
+
+.pos-customer-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.pos-customer-card-title {
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-soft);
+}
+
+.pos-customer-rows {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pos-customer-row {
+  display: grid;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.pos-customer-select-row {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.pos-customer-actions-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.pos-customer-inline-label {
+  margin: 0;
+  white-space: nowrap;
+}
+
+.pos-customer-select,
+.pos-customer-search {
+  min-width: 0;
+}
+
+.pos-customer-add-button {
+  white-space: nowrap;
+}
+
+.pos-customer-credit-line {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--warning);
+}
+
+.pos-customer-notice {
+  margin-bottom: 0;
+  padding: 8px 10px;
+  border-radius: 14px;
+  font-size: 13px;
+}
+
 .pos-session-summary {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
@@ -1868,6 +2146,23 @@ a {
   margin: 14px 0 18px;
   color: var(--text-soft);
   line-height: 1.6;
+}
+
+.expenses-modal {
+  width: min(92vw, 860px);
+}
+
+.expenses-form-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.expenses-form-grid-span {
+  grid-column: 1 / -1;
+}
+
+.expense-description-cell {
+  max-width: 280px;
+  overflow-wrap: anywhere;
 }
 
 .payment-option-grid {
@@ -2067,6 +2362,18 @@ a {
   .product-hint-list.pos-quick-product-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+
+  .pos-page-shell,
+  .pos-main-shell,
+  .pos-layout,
+  .pos-products-panel,
+  .pos-cart-panel,
+  .pos-products-scroll,
+  .pos-cart-scroll {
+    height: auto;
+    min-height: 0;
+    overflow: visible;
+  }
 }
 
 @media (max-width: 980px) {
@@ -2145,8 +2452,33 @@ a {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .expenses-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .pos-customer-select-row,
+  .pos-customer-actions-row {
+    grid-template-columns: 1fr;
+  }
+
+  .pos-customer-inline-label,
+  .pos-customer-add-button {
+    white-space: normal;
+  }
+
   .pos-variant-modal {
     width: 95vw;
+  }
+
+  .pos-refund-modal {
+    width: 96vw;
+  }
+
+  .pos-refund-toolbar,
+  .pos-refund-layout,
+  .pos-refund-item-grid,
+  .pos-refund-form-grid {
+    grid-template-columns: 1fr;
   }
 
   .cart-item {

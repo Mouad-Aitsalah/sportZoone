@@ -72,6 +72,26 @@ enum SessionCaisseStatut {
   FERMEE
 }
 
+enum ChargeCategorie {
+  ELECTRICITE
+  EAU
+  LOYER
+  REPARATION
+  TRANSPORT
+  CARBURANT
+  INTERNET
+  SALAIRE
+  AUTRE
+}
+
+enum ChargeModePaiement {
+  ESPECE
+  CARTE
+  VIREMENT
+  CHEQUE
+  AUTRE
+}
+
 model Organisation {
   id                    String                 @id @default(cuid())
   name                  String                 @unique
@@ -100,6 +120,7 @@ model Organisation {
   ventes                Vente[]
   lignesVente           VenteLigne[]
   retours               Retour[]
+  charges               Charge[]
 }
 
 model CategorieProduit {
@@ -137,6 +158,7 @@ model PointDeVente {
   avoirsFournisseur AvoirFournisseur[]
   sessionsCaisse SessionCaisse[]
   ventes         Vente[]
+  charges        Charge[]
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
 
@@ -159,6 +181,7 @@ model Utilisateur {
   caisse                Caisse?                @relation(fields: [caisseId], references: [id])
   sessionsCaisse        SessionCaisse[]
   ventes                Vente[]
+  charges               Charge[]
   loginApprovalRequests LoginApprovalRequest[]
   createdAt             DateTime               @default(now())
   updatedAt             DateTime               @updatedAt
@@ -280,6 +303,7 @@ model ProduitVariante {
   actif          Boolean         @default(true)
   organisation   Organisation    @relation(fields: [organisationId], references: [id], onDelete: Cascade)
   produit        Produit         @relation(fields: [produitId], references: [id], onDelete: Cascade)
+  achatLignes    AchatLigne[]
   lignesVente    VenteLigne[]
   retours        Retour[]
   createdAt      DateTime        @default(now())
@@ -437,12 +461,15 @@ model Vente {
   caisseId       Int
   utilisateurId  Int
   clientId       Int?
+  originalSaleId Int?
   sessionCaisseId Int?
   organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
   pointDeVente   PointDeVente @relation(fields: [pointDeVenteId], references: [id])
   caisse         Caisse       @relation(fields: [caisseId], references: [id])
   utilisateur    Utilisateur  @relation(fields: [utilisateurId], references: [id])
   client         Client?      @relation(fields: [clientId], references: [id])
+  originalSale   Vente?       @relation("SaleRefundLink", fields: [originalSaleId], references: [id])
+  refundSales    Vente[]      @relation("SaleRefundLink")
   sessionCaisse  SessionCaisse? @relation(fields: [sessionCaisseId], references: [id])
   lignes         VenteLigne[]
   retours        Retour[]
@@ -456,6 +483,7 @@ model Vente {
   @@index([caisseId])
   @@index([utilisateurId])
   @@index([clientId])
+  @@index([originalSaleId])
   @@index([sessionCaisseId])
 }
 
@@ -505,6 +533,31 @@ model Retour {
   @@index([varianteId])
 }
 
+model Charge {
+  id             Int                @id @default(autoincrement())
+  organisationId String
+  pointDeVenteId Int
+  utilisateurId  Int
+  titre          String
+  categorie      ChargeCategorie
+  montant        Decimal            @db.Decimal(10, 2)
+  dateCharge     DateTime           @default(now())
+  modePaiement   ChargeModePaiement @default(ESPECE)
+  description    String?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+  organisation   Organisation       @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+  pointDeVente   PointDeVente       @relation(fields: [pointDeVenteId], references: [id])
+  utilisateur    Utilisateur        @relation(fields: [utilisateurId], references: [id])
+
+  @@index([organisationId])
+  @@index([pointDeVenteId])
+  @@index([utilisateurId])
+  @@index([dateCharge])
+  @@index([categorie])
+  @@index([organisationId, pointDeVenteId, dateCharge])
+}
+
 model Achat {
   id             Int          @id @default(autoincrement())
   organisationId String
@@ -542,6 +595,7 @@ model AchatLigne {
   organisationId String
   achatId        Int
   produitId      Int
+  varianteId     Int?
   quantite       Int
   prixAchatUnitaireHT Decimal  @db.Decimal(10, 2)
   tauxTVA        Decimal      @db.Decimal(5, 2)
@@ -556,10 +610,12 @@ model AchatLigne {
   organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
   achat          Achat        @relation(fields: [achatId], references: [id], onDelete: Cascade)
   produit        Produit      @relation(fields: [produitId], references: [id])
+  variante       ProduitVariante? @relation(fields: [varianteId], references: [id])
 
   @@index([organisationId])
   @@index([achatId])
   @@index([produitId])
+  @@index([varianteId])
   @@map("AchatItem")
 }
 

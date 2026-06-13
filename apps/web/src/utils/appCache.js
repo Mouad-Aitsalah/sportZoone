@@ -101,6 +101,7 @@ export const CACHE_KEYS = {
     `cash-session:${storeId || "default"}:${cashRegisterId || "default"}:${userId || "current"}`,
   comptes: (scope = "all") => `comptes:${scope}`,
   customers: () => "customers",
+  expenses: (scope = "default") => `expenses:${scope}`,
   productCategories: () => "product-categories",
   products: (scope = "default") => `products:${scope}`,
   sales: (scope = "default") => `sales:${scope}`,

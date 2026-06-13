@@ -6,6 +6,15 @@ const parseId = (value) => {
   return Number.isInteger(parsedValue) && parsedValue > 0 ? parsedValue : null;
 };
 
+const buildCashRegisterCode = (pointDeVenteName, pointDeVenteId) =>
+  `${String(pointDeVenteName || "STORE")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 18) || "STORE"}-${pointDeVenteId}-CAISSE-1`;
+
 const normalizeOptionalString = (value) => {
   if (value === undefined) {
     return undefined;
@@ -118,25 +127,44 @@ const createPointDeVente = async (req, res) => {
   try {
     const organisationId = getOrganisationIdFromUser(req.user);
     const { nom, adresse, telephone } = req.body;
+    const normalizedNom = String(nom || "").trim();
 
-    if (!nom || !String(nom).trim()) {
+    if (!normalizedNom) {
       return res.status(400).json({
         message: "Le nom du point de vente est obligatoire.",
       });
     }
 
-    const pointDeVente = await prisma.pointDeVente.create({
-      data: {
-        organisationId,
-        nom: String(nom).trim(),
-        adresse: normalizeOptionalString(adresse),
-        telephone: normalizeOptionalString(telephone),
-      },
-      include: pointDeVenteInclude,
+    const pointDeVente = await prisma.$transaction(async (tx) => {
+      const createdPointDeVente = await tx.pointDeVente.create({
+        data: {
+          organisationId,
+          nom: normalizedNom,
+          adresse: normalizeOptionalString(adresse),
+          telephone: normalizeOptionalString(telephone),
+        },
+      });
+
+      await tx.caisse.create({
+        data: {
+          organisationId,
+          nom: "Caisse 1",
+          code: buildCashRegisterCode(normalizedNom, createdPointDeVente.id),
+          pointDeVenteId: createdPointDeVente.id,
+          estActive: true,
+        },
+      });
+
+      return tx.pointDeVente.findUnique({
+        where: {
+          id: createdPointDeVente.id,
+        },
+        include: pointDeVenteInclude,
+      });
     });
 
     return res.status(201).json({
-      message: "Point de vente cree avec succes.",
+      message: "Point de vente et caisse par defaut crees avec succes.",
       pointDeVente,
     });
   } catch (error) {

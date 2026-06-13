@@ -171,6 +171,11 @@ const getAllSales = async (req, res) => {
     const sales = await prisma.vente.findMany({
       where: {
         organisationId,
+        NOT: {
+          numeroTicket: {
+            startsWith: "LOCAL-",
+          },
+        },
       },
       include: saleInclude,
       orderBy: {

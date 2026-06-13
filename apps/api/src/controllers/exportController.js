@@ -250,7 +250,14 @@ const buildSalesWhereClause = (query, user) => {
   }
 
   return {
-    where,
+    where: {
+      ...where,
+      NOT: {
+        numeroTicket: {
+          startsWith: "LOCAL-",
+        },
+      },
+    },
     filters: {
       startDate: query.startDate || null,
       endDate: query.endDate || null,
@@ -305,7 +312,6 @@ const fetchSalesExportData = async (query, user) => {
     productsCount: sale.lignes.reduce((total, ligne) => total + ligne.quantite, 0),
     total: decimalToNumber(sale.total),
     status: sale.status,
-    syncStatus: "synced",
   }));
 
   return {
@@ -825,7 +831,6 @@ const exportSalesExcel = async (req, res) => {
     { header: "Nb produits", key: "productsCount" },
     { header: "Total", key: "total" },
     { header: "Statut", key: "status" },
-    { header: "Sync", key: "syncStatus" },
   ];
 
   applyWorksheetHeaderStyle(worksheet.getRow(1));
@@ -880,8 +885,7 @@ const exportSalesPdf = async (req, res) => {
     { label: "Caissier", x: 281, width: 72 },
     { label: "Nb", x: 353, width: 22 },
     { label: "Total", x: 375, width: 45 },
-    { label: "Statut", x: 420, width: 45 },
-    { label: "Sync", x: 465, width: 48 },
+    { label: "Statut", x: 420, width: 90 },
   ];
 
   addPdfTableHeader(doc, columns);
@@ -899,7 +903,6 @@ const exportSalesPdf = async (req, res) => {
     doc.text(String(row.productsCount), columns[5].x, top, { width: columns[5].width });
     doc.text(formatCurrency(row.total), columns[6].x, top, { width: columns[6].width });
     doc.text(row.status, columns[7].x, top, { width: columns[7].width });
-    doc.text(row.syncStatus, columns[8].x, top, { width: columns[8].width });
     doc.moveDown(0.9);
   });
 

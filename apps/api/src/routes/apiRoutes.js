@@ -9,6 +9,7 @@ const purchaseController = require("../controllers/purchaseController");
 const avoirController = require("../controllers/avoirController");
 const cashSessionController = require("../controllers/cashSessionController");
 const organisationController = require("../controllers/organisationController");
+const expenseController = require("../controllers/expenseController");
 const authMiddleware = require("../middlewares/authMiddleware");
 const loginRateLimitMiddleware = require("../middlewares/loginRateLimitMiddleware");
 const roleMiddleware = require("../middlewares/roleMiddleware");
@@ -93,6 +94,11 @@ router.post(
   roleMiddleware("ADMIN", "EMPLOYE"),
   asyncHandler(apiController.createRefund)
 );
+router.post(
+  "/sales/refund-free",
+  roleMiddleware("ADMIN", "EMPLOYE"),
+  asyncHandler(apiController.createRefund)
+);
 router.get(
   "/cash-sessions/current",
   roleMiddleware("ADMIN", "EMPLOYE"),
@@ -125,6 +131,11 @@ router.post(
 );
 router.post(
   "/sales/:id/return",
+  roleMiddleware("ADMIN", "EMPLOYE"),
+  asyncHandler(apiController.returnSale)
+);
+router.post(
+  "/sales/:id/refund",
   roleMiddleware("ADMIN", "EMPLOYE"),
   asyncHandler(apiController.returnSale)
 );
@@ -236,6 +247,26 @@ router.delete(
   roleMiddleware("ADMIN"),
   asyncHandler(purchaseController.deletePurchase)
 );
+router.get(
+  "/expenses",
+  roleMiddleware("ADMIN", "SUPER_ADMIN", "ADMIN_GLOBAL"),
+  asyncHandler(expenseController.getExpenses)
+);
+router.post(
+  "/expenses",
+  roleMiddleware("ADMIN", "SUPER_ADMIN", "ADMIN_GLOBAL"),
+  asyncHandler(expenseController.createExpense)
+);
+router.put(
+  "/expenses/:id",
+  roleMiddleware("ADMIN", "SUPER_ADMIN", "ADMIN_GLOBAL"),
+  asyncHandler(expenseController.updateExpense)
+);
+router.delete(
+  "/expenses/:id",
+  roleMiddleware("ADMIN", "SUPER_ADMIN", "ADMIN_GLOBAL"),
+  asyncHandler(expenseController.deleteExpense)
+);
 router.post(
   "/avoirs",
   roleMiddleware("ADMIN", "EMPLOYE"),
@@ -338,7 +369,11 @@ router.post(
   asyncHandler(apiController.toggleAutoReportStatus)
 );
 router.get("/users", roleMiddleware("ADMIN"), asyncHandler(apiController.getUsers));
-router.get("/stores", roleMiddleware("ADMIN", "EMPLOYE"), asyncHandler(apiController.getStores));
+router.get(
+  "/stores",
+  roleMiddleware("ADMIN", "EMPLOYE", "SUPER_ADMIN", "ADMIN_GLOBAL"),
+  asyncHandler(apiController.getStores)
+);
 router.get(
   "/cash-registers",
   roleMiddleware("ADMIN", "EMPLOYE"),

@@ -14,6 +14,18 @@ const periodOptions = [
   { key: "month", label: "Mois" },
 ];
 
+const EXPENSE_CATEGORY_LABELS = {
+  ELECTRICITE: "Electricite",
+  EAU: "Eau",
+  LOYER: "Loyer",
+  REPARATION: "Reparation",
+  TRANSPORT: "Transport",
+  CARBURANT: "Carburant",
+  INTERNET: "Internet",
+  SALAIRE: "Salaire",
+  AUTRE: "Autre",
+};
+
 function ReportsPage() {
   const [period, setPeriod] = useState("day");
   const [report, setReport] = useState(null);
@@ -120,7 +132,13 @@ function ReportsPage() {
       {
         label: "Benefice net",
         value: isLoading ? "Chargement..." : formatCurrencyDh(report?.netProfit || 0),
-        detail: "Marge nette calculee a partir des ventes.",
+        detail: "Marge nette apres deduction du cout d'achat et des charges.",
+        tone: "info",
+      },
+      {
+        label: "Charges",
+        value: isLoading ? "Chargement..." : formatCurrencyDh(report?.expensesTotal || 0),
+        detail: "Total des depenses enregistrees sur la periode.",
         tone: "info",
       },
       {
@@ -319,13 +337,14 @@ function ReportsPage() {
       <div className="dashboard-grid dashboard-secondary-grid">
         <SectionCard
           title="Ventes par magasin"
-          description="Synthese du chiffre d'affaires et du volume de tickets."
+          description="Synthese du chiffre d'affaires, du volume de tickets et des charges."
         >
           <DataTable
             columns={[
               { key: "store", label: "Magasin" },
               { key: "salesCount", label: "Nb ventes" },
               { key: "revenue", label: "Revenu" },
+              { key: "expenses", label: "Charges" },
               { key: "netProfit", label: "Benefice net" },
             ]}
             data={report?.salesByStore || []}
@@ -340,6 +359,7 @@ function ReportsPage() {
                 <td>{item.store || item.storeName || "-"}</td>
                 <td>{item.salesCount || item.count || 0}</td>
                 <td>{formatCurrencyDh(item.revenue || 0)}</td>
+                <td>{formatCurrencyDh(item.expenses || 0)}</td>
                 <td>{formatCurrencyDh(item.netProfit || 0)}</td>
               </tr>
             )}
@@ -370,6 +390,60 @@ function ReportsPage() {
                 <td>{item.quantitySold || item.quantity || item.unitsSold || 0}</td>
                 <td>{formatCurrencyDh(item.revenue || 0)}</td>
                 <td>{formatCurrencyDh(item.netProfit || 0)}</td>
+              </tr>
+            )}
+          />
+        </SectionCard>
+      </div>
+
+      <div className="dashboard-grid">
+        <SectionCard
+          title="Charges par categorie"
+          description="Total des depenses regroupees par categorie sur la periode."
+        >
+          <DataTable
+            columns={[
+              { key: "category", label: "Categorie" },
+              { key: "total", label: "Total charges" },
+            ]}
+            data={report?.expensesByCategory || []}
+            emptyTitle={isLoading ? "Chargement..." : "Aucune charge"}
+            emptyDescription={
+              isLoading
+                ? "Recuperation des charges en cours."
+                : "Aucune depense n'a ete enregistree sur cette periode."
+            }
+            renderRow={(item, index) => (
+              <tr key={`${item.category || "category"}-${index}`}>
+                <td>{EXPENSE_CATEGORY_LABELS[item.category] || item.category || "-"}</td>
+                <td>{formatCurrencyDh(item.total || 0)}</td>
+              </tr>
+            )}
+          />
+        </SectionCard>
+
+        <SectionCard
+          title="Charges par magasin"
+          description="Volume des depenses enregistrees par point de vente."
+        >
+          <DataTable
+            columns={[
+              { key: "store", label: "Magasin" },
+              { key: "count", label: "Nb charges" },
+              { key: "total", label: "Total charges" },
+            ]}
+            data={report?.expensesByStore || []}
+            emptyTitle={isLoading ? "Chargement..." : "Aucune charge magasin"}
+            emptyDescription={
+              isLoading
+                ? "Recuperation des charges en cours."
+                : "Aucune charge magasin disponible pour cette periode."
+            }
+            renderRow={(item, index) => (
+              <tr key={`${item.storeName || "store"}-${index}`}>
+                <td>{item.storeName || "-"}</td>
+                <td>{item.expensesCount || 0}</td>
+                <td>{formatCurrencyDh(item.totalExpenses || 0)}</td>
               </tr>
             )}
           />

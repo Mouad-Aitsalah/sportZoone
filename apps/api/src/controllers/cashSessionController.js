@@ -7,13 +7,19 @@ const {
 } = require("../utils/organisationScope");
 const {
   cashSessionInclude,
+  cashSessionIncludeLegacy,
   cashSessionListInclude,
   cashSessionPosInclude,
+  cashSessionPosIncludeLegacy,
   createCashSession,
   getCashSessionDayRange,
   recalculateCashSessionMetrics,
   toApiCashSession,
 } = require("../services/cashSessionService");
+const {
+  isPrismaMissingColumnError,
+  logPrismaCompatFallback,
+} = require("../utils/prismaCompat");
 
 const isBlankString = (value) => typeof value === "string" && value.trim() === "";
 
@@ -74,6 +80,21 @@ const logControllerDuration = (route, startedAt, metadata = {}) => {
   });
 };
 
+const withMissingColumnFallback = async (scope, primaryQuery, fallbackQuery) => {
+  try {
+    return await primaryQuery();
+  } catch (error) {
+    if (!isPrismaMissingColumnError(error)) {
+      throw error;
+    }
+
+    logPrismaCompatFallback(scope, error, {
+      action: "Retrying without original sale link fields.",
+    });
+    return fallbackQuery();
+  }
+};
+
 const findCurrentOpenSession = async ({
   tx = prisma,
   organisationId,
@@ -107,12 +128,23 @@ const getCurrentCashSession = async (req, res) => {
       });
     }
 
-    const session = await findCurrentOpenSession({
-      organisationId,
-      storeId,
-      cashRegisterId,
-      include: isPosView ? cashSessionPosInclude : cashSessionInclude,
-    });
+    const session = await withMissingColumnFallback(
+      "cashSessionController.getCurrentCashSession",
+      () =>
+        findCurrentOpenSession({
+          organisationId,
+          storeId,
+          cashRegisterId,
+          include: isPosView ? cashSessionPosInclude : cashSessionInclude,
+        }),
+      () =>
+        findCurrentOpenSession({
+          organisationId,
+          storeId,
+          cashRegisterId,
+          include: isPosView ? cashSessionPosIncludeLegacy : cashSessionIncludeLegacy,
+        })
+    );
 
     return res.status(200).json({
       data: session
@@ -216,13 +248,25 @@ const getCashSessionById = async (req, res) => {
     throw createHttpError(400, "cash session id must be a valid positive integer.");
   }
 
-  const session = await prisma.sessionCaisse.findFirst({
-    where: {
-      organisationId,
-      id: sessionId,
-    },
-    include: cashSessionInclude,
-  });
+  const session = await withMissingColumnFallback(
+    "cashSessionController.getCashSessionById",
+    () =>
+      prisma.sessionCaisse.findFirst({
+        where: {
+          organisationId,
+          id: sessionId,
+        },
+        include: cashSessionInclude,
+      }),
+    () =>
+      prisma.sessionCaisse.findFirst({
+        where: {
+          organisationId,
+          id: sessionId,
+        },
+        include: cashSessionIncludeLegacy,
+      })
+  );
 
   if (!session) {
     throw createHttpError(404, "Cash session not found.");
@@ -319,20 +363,47 @@ const closeCashSession = async (req, res) => {
       date: closedAt,
     });
 
-    const [closedSessionRecord, currentSessionRecord] = await Promise.all([
-      tx.sessionCaisse.findUnique({
-        where: {
-          id: existingSession.id,
-        },
-        include: cashSessionInclude,
-      }),
-      tx.sessionCaisse.findUnique({
-        where: {
-          id: nextSession.id,
-        },
-        include: cashSessionInclude,
-      }),
-    ]);
+    let closedSessionRecord;
+    let currentSessionRecord;
+
+    try {
+      [closedSessionRecord, currentSessionRecord] = await Promise.all([
+        tx.sessionCaisse.findUnique({
+          where: {
+            id: existingSession.id,
+          },
+          include: cashSessionInclude,
+        }),
+        tx.sessionCaisse.findUnique({
+          where: {
+            id: nextSession.id,
+          },
+          include: cashSessionInclude,
+        }),
+      ]);
+    } catch (error) {
+      if (!isPrismaMissingColumnError(error)) {
+        throw error;
+      }
+
+      logPrismaCompatFallback("cashSessionController.closeCashSession", error, {
+        action: "Retrying closed/current session fetch without original sale link fields.",
+      });
+      [closedSessionRecord, currentSessionRecord] = await Promise.all([
+        tx.sessionCaisse.findUnique({
+          where: {
+            id: existingSession.id,
+          },
+          include: cashSessionIncludeLegacy,
+        }),
+        tx.sessionCaisse.findUnique({
+          where: {
+            id: nextSession.id,
+          },
+          include: cashSessionIncludeLegacy,
+        }),
+      ]);
+    }
 
     return {
       closedSession: closedSessionRecord,
@@ -357,11 +428,22 @@ const closeCurrentCashSession = async (req, res) => {
     throw createHttpError(400, "Aucune caisse active n'est disponible.");
   }
 
-  const currentSession = await findCurrentOpenSession({
-    organisationId,
-    storeId,
-    cashRegisterId,
-  });
+  const currentSession = await withMissingColumnFallback(
+    "cashSessionController.closeCurrentCashSession",
+    () =>
+      findCurrentOpenSession({
+        organisationId,
+        storeId,
+        cashRegisterId,
+      }),
+    () =>
+      findCurrentOpenSession({
+        organisationId,
+        storeId,
+        cashRegisterId,
+        include: cashSessionIncludeLegacy,
+      })
+  );
 
   if (!currentSession) {
     throw createHttpError(404, "Aucune session ouverte a cloturer.");

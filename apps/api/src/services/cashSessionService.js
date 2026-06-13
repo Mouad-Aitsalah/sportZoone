@@ -117,6 +117,91 @@ const cashSessionSaleInclude = {
       compte: true,
     },
   },
+  originalSale: {
+    select: {
+      id: true,
+      numeroTicket: true,
+      dateVente: true,
+    },
+  },
+  lignes: {
+    orderBy: {
+      id: "asc",
+    },
+    include: {
+      produit: {
+        select: {
+          id: true,
+          nom: true,
+          codeBarres: true,
+          categorie: true,
+          prixAchat: true,
+        },
+      },
+      variante: {
+        select: {
+          id: true,
+          taille: true,
+          couleur: true,
+          codeBarres: true,
+          prixAchat: true,
+        },
+      },
+    },
+  },
+  retours: {
+    select: {
+      id: true,
+      produitId: true,
+      varianteId: true,
+      quantite: true,
+      raison: true,
+      createdAt: true,
+    },
+  },
+};
+
+const cashSessionSaleIncludeLegacy = {
+  id: true,
+  numeroTicket: true,
+  dateVente: true,
+  createdAt: true,
+  paymentMethod: true,
+  paidAmount: true,
+  remainingAmount: true,
+  paymentStatus: true,
+  status: true,
+  total: true,
+  pointDeVenteId: true,
+  caisseId: true,
+  utilisateurId: true,
+  clientId: true,
+  pointDeVente: {
+    select: {
+      id: true,
+      nom: true,
+    },
+  },
+  caisse: {
+    select: {
+      id: true,
+      nom: true,
+      code: true,
+    },
+  },
+  utilisateur: {
+    select: {
+      id: true,
+      nom: true,
+      email: true,
+      role: true,
+    },
+  },
+  client: {
+    include: {
+      compte: true,
+    },
+  },
   lignes: {
     orderBy: {
       id: "asc",
@@ -155,6 +240,64 @@ const cashSessionSaleInclude = {
 };
 
 const cashSessionPosSaleInclude = {
+  caisse: {
+    select: {
+      id: true,
+      nom: true,
+      code: true,
+    },
+  },
+  utilisateur: {
+    select: {
+      id: true,
+      nom: true,
+    },
+  },
+  originalSale: {
+    select: {
+      id: true,
+      numeroTicket: true,
+      dateVente: true,
+    },
+  },
+  lignes: {
+    orderBy: {
+      id: "asc",
+    },
+    include: {
+      produit: {
+        select: {
+          id: true,
+          nom: true,
+        },
+      },
+      variante: {
+        select: {
+          id: true,
+          taille: true,
+          couleur: true,
+          codeBarres: true,
+        },
+      },
+    },
+  },
+};
+
+const cashSessionPosSaleIncludeLegacy = {
+  id: true,
+  numeroTicket: true,
+  dateVente: true,
+  createdAt: true,
+  paymentMethod: true,
+  paidAmount: true,
+  remainingAmount: true,
+  paymentStatus: true,
+  status: true,
+  total: true,
+  pointDeVenteId: true,
+  caisseId: true,
+  utilisateurId: true,
+  clientId: true,
   caisse: {
     select: {
       id: true,
@@ -224,6 +367,39 @@ const cashSessionInclude = {
   },
 };
 
+const cashSessionIncludeLegacy = {
+  caisse: {
+    select: {
+      id: true,
+      nom: true,
+      code: true,
+      estActive: true,
+    },
+  },
+  pointDeVente: {
+    select: {
+      id: true,
+      nom: true,
+      adresse: true,
+      telephone: true,
+    },
+  },
+  utilisateur: {
+    select: {
+      id: true,
+      nom: true,
+      email: true,
+      role: true,
+    },
+  },
+  ventes: {
+    orderBy: {
+      dateVente: "desc",
+    },
+    select: cashSessionSaleIncludeLegacy,
+  },
+};
+
 const cashSessionPosInclude = {
   caisse: {
     select: {
@@ -254,6 +430,39 @@ const cashSessionPosInclude = {
       dateVente: "desc",
     },
     include: cashSessionPosSaleInclude,
+  },
+};
+
+const cashSessionPosIncludeLegacy = {
+  caisse: {
+    select: {
+      id: true,
+      nom: true,
+      code: true,
+      estActive: true,
+    },
+  },
+  pointDeVente: {
+    select: {
+      id: true,
+      nom: true,
+      adresse: true,
+      telephone: true,
+    },
+  },
+  utilisateur: {
+    select: {
+      id: true,
+      nom: true,
+      email: true,
+      role: true,
+    },
+  },
+  ventes: {
+    orderBy: {
+      dateVente: "desc",
+    },
+    select: cashSessionPosSaleIncludeLegacy,
   },
 };
 
@@ -335,6 +544,14 @@ const formatCashSessionSale = (sale) => {
     customerId: sale.client?.compte?.id || sale.clientId || null,
     customerNumber: sale.client ? sale.client.numeroClient : null,
     customerName: sale.client?.compte?.nom || sale.client?.nom || "Client inconnu",
+    originalSaleId: sale.originalSale?.id || null,
+    originalSale: sale.originalSale
+      ? {
+          id: sale.originalSale.id,
+          ticketNumber: sale.originalSale.numeroTicket,
+          date: sale.originalSale.dateVente,
+        }
+      : null,
     itemsCount: sale.lignes.reduce(
       (totalItems, ligne) => totalItems + ligne.quantite,
       0
@@ -501,10 +718,14 @@ const recalculateCashSessionMetrics = async (tx, { organisationId, sessionId }) 
 
 module.exports = {
   cashSessionInclude,
+  cashSessionIncludeLegacy,
   cashSessionListInclude,
   cashSessionPosInclude,
+  cashSessionPosIncludeLegacy,
   cashSessionSaleInclude,
+  cashSessionSaleIncludeLegacy,
   cashSessionPosSaleInclude,
+  cashSessionPosSaleIncludeLegacy,
   createCashSession,
   decimalToNumber,
   ensureOpenCashSession,

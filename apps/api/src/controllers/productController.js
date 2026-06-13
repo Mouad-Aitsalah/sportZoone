@@ -485,6 +485,7 @@ const mapProductToResponse = (product) => {
     id: product.id,
     name: product.nom,
     barcode: product.codeBarres,
+    codeBarres: product.codeBarres,
     organisationId: product.organisationId,
     categoryId: product.categorieProduit?.id || product.categorieId || null,
     categoryCode: product.categorieProduit?.code || null,

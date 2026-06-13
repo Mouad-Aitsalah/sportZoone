@@ -6,6 +6,7 @@ import LoginPage from "./pages/LoginPage";
 import PosPage from "./pages/PosPage";
 import OrganisationsPage from "./pages/OrganisationsPage";
 import PurchasesPage from "./pages/PurchasesPage";
+import ExpensesPage from "./pages/ExpensesPage";
 import ProductsPage from "./pages/ProductsPage";
 import ReportsPage from "./pages/ReportsPage";
 import SalesHistoryPage from "./pages/SalesHistoryPage";
@@ -49,6 +50,7 @@ function App() {
                 element={<Navigate to={ROUTE_PATHS.COMPTES} replace />}
               />
               <Route path={ROUTE_PATHS.PURCHASES} element={<PurchasesPage />} />
+              <Route path={ROUTE_PATHS.EXPENSES} element={<ExpensesPage />} />
             </Route>
           </Route>
 

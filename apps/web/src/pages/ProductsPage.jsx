@@ -102,7 +102,48 @@ const getProductVariants = (product) => {
 const getActiveProductVariants = (product) =>
   getProductVariants(product);
 
+const getProductBarcodeValue = (product) => product?.barcode || product?.codeBarres || "";
+
 const getVariantBarcodeValue = (variant) => variant?.barcode || variant?.codeBarres || "";
+
+const getProductVariantBarcodeValues = (product) =>
+  [...new Set(
+    getProductVariants(product)
+      .map((variant) => String(getVariantBarcodeValue(variant) || "").trim())
+      .filter(Boolean)
+  )];
+
+const getProductBarcodeDisplay = (product) => {
+  const productBarcode = String(getProductBarcodeValue(product) || "").trim();
+
+  if (productBarcode) {
+    return {
+      value: productBarcode,
+      title: productBarcode,
+    };
+  }
+
+  const variantBarcodes = getProductVariantBarcodeValues(product);
+
+  if (variantBarcodes.length === 0) {
+    return {
+      value: "-",
+      title: "Aucun code-barres",
+    };
+  }
+
+  if (variantBarcodes.length === 1) {
+    return {
+      value: variantBarcodes[0],
+      title: variantBarcodes[0],
+    };
+  }
+
+  return {
+    value: "Voir variantes",
+    title: variantBarcodes.join(", "),
+  };
+};
 
 const getVariantSizeValue = (variant) => variant?.size || variant?.taille || "";
 
@@ -465,7 +506,10 @@ const buildProductsSummaryStats = (products = []) =>
       stats.totalProducts += 1;
       stats.totalVariants += variants.length;
 
-      if (!String(product?.barcode || "").trim()) {
+      const resolvedProductBarcode = getProductBarcodeValue(product);
+      const variantBarcodes = getProductVariantBarcodeValues(product);
+
+      if (!String(resolvedProductBarcode || "").trim() && variantBarcodes.length === 0) {
         stats.missingBarcodes += 1;
       }
 
@@ -1903,6 +1947,7 @@ function ProductsPage() {
           }
           renderRow={(product) => {
             const variants = getProductVariants(product);
+            const productBarcodeDisplay = getProductBarcodeDisplay(product);
             const hasMultipleVariants = variants.length > 1;
             const matchedVariantKeys = new Set(
               matchedVariantKeysByProduct[product.id] || []
@@ -1942,7 +1987,7 @@ function ProductsPage() {
                       ) : null}
                     </div>
                   </td>
-                  <td>{product.barcode || "-"}</td>
+                  <td title={productBarcodeDisplay.title}>{productBarcodeDisplay.value}</td>
                   <td>{product.supplierName || "-"}</td>
                   <td>{product.category}</td>
                   <td>{formatCurrencyDh(product.purchasePrice || 0)}</td>
@@ -2116,7 +2161,9 @@ function ProductsPage() {
                 <option value="">Selectionner un produit</option>
                 {products.map((product) => (
                   <option key={product.id} value={product.id}>
-                    {[product.name, product.barcode].filter(Boolean).join(" - ")}
+                    {[product.name, getProductBarcodeDisplay(product).value]
+                      .filter((value) => value && value !== "-")
+                      .join(" - ")}
                   </option>
                 ))}
               </select>
@@ -2658,7 +2705,7 @@ function ProductsPage() {
           <div className="delete-product-summary">
             <p className="delete-product-name">{deleteModal.product.name}</p>
             <p className="delete-product-meta">
-              Code-barres: {deleteModal.product.barcode || "-"}
+              Code-barres: {getProductBarcodeDisplay(deleteModal.product).value}
             </p>
           </div>
         ) : null}

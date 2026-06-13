@@ -75,6 +75,13 @@ const navigationItems = [
     index: "11",
     roles: ["admin"],
   },
+  {
+    label: "Charges / Depenses",
+    description: "Suivi des depenses du magasin.",
+    path: ROUTE_PATHS.EXPENSES,
+    index: "12",
+    roles: ["admin", "super_admin", "admin_global"],
+  },
 ];
 
 const sectionHighlights = {
@@ -117,6 +124,10 @@ const sectionHighlights = {
   [ROUTE_PATHS.PURCHASES]: {
     title: "Gestion des achats",
     subtitle: "Enregistrer les approvisionnements fournisseurs et leur impact magasin.",
+  },
+  [ROUTE_PATHS.EXPENSES]: {
+    title: "Suivi des charges",
+    subtitle: "Centraliser les depenses du magasin et leur impact financier.",
   },
 };
 

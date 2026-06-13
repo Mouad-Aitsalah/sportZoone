@@ -7,12 +7,6 @@ import Modal from "../components/Modal";
 import PageHeader from "../components/PageHeader";
 import SearchInput from "../components/SearchInput";
 import SectionCard from "../components/SectionCard";
-import {
-  getOfflineSales,
-  markSaleAsFailed,
-  markSaleAsSynced,
-  updateSaleStatus,
-} from "../services/offlineDb";
 import { getCurrentUser, isAdminRole, isCashierRole } from "../store/authStore";
 import {
   CACHE_KEYS,
@@ -242,41 +236,6 @@ const getPaymentMethodMeta = (paymentMethod) => {
   };
 };
 
-const getSyncStatusMeta = (syncStatus, localOnly = false) => {
-  if (syncStatus === "pending") {
-    return {
-      label: "En attente",
-      tone: "warning",
-    };
-  }
-
-  if (syncStatus === "failed") {
-    return {
-      label: "Erreur",
-      tone: "danger",
-    };
-  }
-
-  if (syncStatus === "syncing") {
-    return {
-      label: "Synchronisation...",
-      tone: "info",
-    };
-  }
-
-  if (syncStatus === "synced") {
-    return {
-      label: "Synchronise",
-      tone: "success",
-    };
-  }
-
-  return {
-    label: localOnly ? "En attente" : "En ligne",
-    tone: "success",
-  };
-};
-
 const getSessionStatusMeta = (status) => {
   if (status === "FERMEE") {
     return {
@@ -298,17 +257,28 @@ const getSessionStatusMeta = (status) => {
   };
 };
 
+const isLocalTicketSale = (sale) =>
+  String(sale?.ticketNumber || sale?.numeroTicket || "")
+    .trim()
+    .toUpperCase()
+    .startsWith("LOCAL-");
+
+const filterVisibleSales = (sales) =>
+  (Array.isArray(sales) ? sales : []).filter((sale) => !isLocalTicketSale(sale));
+
 const filterSalesList = (sales, { searchTerm, selectedDate, selectedPaymentMethod }) => {
   const query = searchTerm.trim().toLowerCase();
 
   return sales.filter((sale) => {
     const ticket = sale.ticketNumber || sale.id?.toString() || "";
+    const originalTicket = sale.originalSale?.ticketNumber || "";
     const customerName = sale.customerName || "";
     const customerNumber = sale.customerNumber || "";
     const saleDate = sale.date || sale.createdAt || "";
     const matchesSearch =
       !query ||
       ticket.toLowerCase().includes(query) ||
+      originalTicket.toLowerCase().includes(query) ||
       customerName.toLowerCase().includes(query) ||
       String(customerNumber).includes(query);
     const matchesDate = !selectedDate || saleDate.startsWith(selectedDate);
@@ -318,55 +288,6 @@ const filterSalesList = (sales, { searchTerm, selectedDate, selectedPaymentMetho
     return matchesSearch && matchesDate && matchesPaymentMethod;
   });
 };
-
-const mapOfflineSaleToHistorySale = (sale) => ({
-  id: `local-${sale.localId}`,
-  localId: sale.localId,
-  ticketNumber: `LOCAL-${String(sale.localId || "")
-    .replace(/[^a-zA-Z0-9]/g, "")
-    .slice(0, 8)
-    .toUpperCase()}`,
-  date: sale.createdAt,
-  createdAt: sale.createdAt,
-  type: "sale",
-  storeId: sale.storeId || null,
-  storeName: sale.storeName || (sale.storeId ? `Magasin ${sale.storeId}` : "-"),
-  cashRegisterId: sale.caisseId || sale.cashRegisterId || null,
-  cashRegisterName:
-    sale.caisseName ||
-    sale.cashRegisterName ||
-    (sale.caisseId || sale.cashRegisterId
-      ? `Caisse ${sale.caisseId || sale.cashRegisterId}`
-      : "-"),
-  userId: sale.userId || null,
-  cashierName: sale.cashierName || (sale.userId ? `Utilisateur ${sale.userId}` : "-"),
-  customerId: sale.clientId || null,
-  customerNumber: sale.customerNumber || null,
-  customerName: sale.clientName || sale.customerName || "Client inconnu",
-  customerCredit: sale.customerCredit || 0,
-  paymentMethod: sale.paymentMethod,
-  paidAmount: sale.paidAmount || sale.total || 0,
-  remainingAmount: sale.remainingAmount || 0,
-  paymentStatus: sale.paymentStatus || "PAID",
-  status: "pending_sync",
-  syncStatus: sale.syncStatus || "pending",
-  syncError: sale.syncError || null,
-  total: sale.total || 0,
-  itemsCount: Array.isArray(sale.items) ? sale.items.length : 0,
-  localOnly: true,
-  items: (sale.items || []).map((item) => ({
-    productId: item.productId,
-    variantId: item.variantId || null,
-    productName: item.productName || item.name || `Produit #${item.productId || "-"}`,
-    variantLabel: item.variantLabel || null,
-    quantity: item.quantity || 0,
-    returnedQuantity: 0,
-    remainingReturnQuantity: 0,
-    unitPrice: item.unitPrice || 0,
-    subtotal:
-      item.subtotal || (item.quantity || 0) * (item.unitPrice || 0),
-  })),
-});
 
 function SalesHistoryPage() {
   const location = useLocation();
@@ -384,7 +305,6 @@ function SalesHistoryPage() {
   const [salePaymentMethod, setSalePaymentMethod] = useState("cash");
   const [backendSales, setBackendSales] = useState([]);
   const [backendSessions, setBackendSessions] = useState([]);
-  const [offlineSales, setOfflineSalesState] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingSessionDetails, setIsLoadingSessionDetails] = useState(false);
   const [isExportingExcel, setIsExportingExcel] = useState(false);
@@ -392,7 +312,6 @@ function SalesHistoryPage() {
   const [isSubmittingCancel, setIsSubmittingCancel] = useState(false);
   const [isSubmittingReturn, setIsSubmittingReturn] = useState(false);
   const [isSubmittingSalePayment, setIsSubmittingSalePayment] = useState(false);
-  const [isSynchronizingOfflineSales, setIsSynchronizingOfflineSales] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [notice, setNotice] = useState({ type: "", message: "" });
   const [cancelModalError, setCancelModalError] = useState("");
@@ -410,31 +329,18 @@ function SalesHistoryPage() {
     isCashier ? "cashier-history" : "admin-history"
   );
 
-  const loadOfflineSalesState = useCallback(async () => {
-    const localSales = await getOfflineSales();
-    setOfflineSalesState(localSales.map(mapOfflineSaleToHistorySale));
-    return localSales;
-  }, []);
-
   const fetchPageData = useCallback(async () => {
-    const [salesResult, sessionsResult, offlineSalesResult] = await Promise.allSettled([
+    const [salesResult, sessionsResult] = await Promise.allSettled([
       api.get("/sales", {
         params: {
           limit: 500,
         },
       }),
       isCashier ? Promise.resolve({ data: { data: [] } }) : api.getCashSessions(),
-      getOfflineSales(),
     ]);
 
-    if (offlineSalesResult.status === "fulfilled") {
-      setOfflineSalesState(offlineSalesResult.value.map(mapOfflineSaleToHistorySale));
-    } else {
-      setOfflineSalesState([]);
-    }
-
     if (salesResult.status === "fulfilled") {
-      const nextSales = getSalesCollection(salesResult.value.data);
+      const nextSales = filterVisibleSales(getSalesCollection(salesResult.value.data));
       setBackendSales(nextSales);
       writeCache(salesCacheKey, nextSales);
     }
@@ -445,10 +351,7 @@ function SalesHistoryPage() {
       writeCache(sessionsCacheKey, nextSessions);
     }
 
-    const hasOfflineSales =
-      offlineSalesResult.status === "fulfilled" && offlineSalesResult.value.length > 0;
-
-    if (salesResult.status === "rejected" && sessionsResult.status === "rejected" && !hasOfflineSales) {
+    if (salesResult.status === "rejected" && sessionsResult.status === "rejected") {
       throw salesResult.reason;
     }
   }, [isCashier, salesCacheKey, sessionsCacheKey]);
@@ -462,7 +365,7 @@ function SalesHistoryPage() {
       const hasCachedData = Boolean(cachedSales || cachedSessions);
 
       if (cachedSales && isMounted) {
-        setBackendSales(Array.isArray(cachedSales.data) ? cachedSales.data : []);
+        setBackendSales(filterVisibleSales(Array.isArray(cachedSales.data) ? cachedSales.data : []));
       }
 
       if (cachedSessions && isMounted) {
@@ -537,20 +440,12 @@ function SalesHistoryPage() {
 
   const sales = useMemo(
     () =>
-      [...offlineSales, ...backendSales].sort(
+      [...backendSales].sort(
         (left, right) =>
           new Date(right.date || right.createdAt || 0).getTime() -
           new Date(left.date || left.createdAt || 0).getTime()
       ),
-    [backendSales, offlineSales]
-  );
-
-  const hasSyncableOfflineSales = useMemo(
-    () =>
-      offlineSales.some(
-        (sale) => sale.localOnly && ["pending", "failed"].includes(sale.syncStatus)
-      ),
-    [offlineSales]
+    [backendSales]
   );
 
   const filteredSales = useMemo(
@@ -584,7 +479,7 @@ function SalesHistoryPage() {
 
   const filteredSelectedSessionSales = useMemo(
     () =>
-      filterSalesList(selectedSession?.sales || [], {
+      filterSalesList(filterVisibleSales(selectedSession?.sales || []), {
         searchTerm,
         selectedDate,
         selectedPaymentMethod,
@@ -662,9 +557,16 @@ function SalesHistoryPage() {
       setIsLoadingSessionDetails(true);
       setSelectedSessionError("");
       const response = await api.getCashSessionById(session.id);
-      setSelectedSession(response.data?.data || session);
+      const sessionDetails = response.data?.data || session;
+      setSelectedSession({
+        ...sessionDetails,
+        sales: filterVisibleSales(sessionDetails?.sales || []),
+      });
     } catch (error) {
-      setSelectedSession(session);
+      setSelectedSession({
+        ...session,
+        sales: filterVisibleSales(session?.sales || []),
+      });
       setSelectedSessionError(
         error.response?.data?.message || "Impossible de charger les commandes de cette session."
       );
@@ -684,18 +586,13 @@ function SalesHistoryPage() {
     const saleNet =
       Number.isFinite(Number(sale.net)) ? Number(sale.net) : getSaleNetProfit(sale);
     const paymentMeta = getPaymentMethodMeta(sale.paymentMethod);
-    const statusMeta = sale.localOnly
-      ? {
-          label: "En attente sync",
-          tone: "warning",
-        }
-      : getSaleStatusMeta(
-          sale.status,
-          sale.paymentMethod,
-          sale.type,
-          sale.total,
-          sale.paymentStatus
-        );
+    const statusMeta = getSaleStatusMeta(
+      sale.status,
+      sale.paymentMethod,
+      sale.type,
+      sale.total,
+      sale.paymentStatus
+    );
     const returnActionLabel = refundSelectionMode
       ? "Rembourser cette facture"
       : "Retour";
@@ -706,7 +603,17 @@ function SalesHistoryPage() {
     return (
       <tr key={`${ticket}-${index}`}>
         <td>
-          <strong>{ticket}</strong>
+          <div className="table-cell-stack">
+            <strong>{ticket}</strong>
+            <span className="muted-text">
+              {getSaleTypeMeta(sale.type, sale.total).label}
+            </span>
+            {sale.originalSale?.ticketNumber ? (
+              <span className="muted-text">
+                Vente d'origine: {sale.originalSale.ticketNumber}
+              </span>
+            ) : null}
+          </div>
         </td>
         <td>{saleDate ? formatDateTime(saleDate) : "-"}</td>
         <td>{customerLabel}</td>
@@ -726,11 +633,6 @@ function SalesHistoryPage() {
                   Reste: {formatCurrencyDh(sale.remainingAmount || 0)}
                 </span>
               </>
-            ) : null}
-            {sale.localOnly ? (
-              <span className="muted-text">
-                {getSyncStatusMeta(sale.syncStatus, sale.localOnly).label}
-              </span>
             ) : null}
           </div>
         </td>
@@ -1039,102 +941,15 @@ function SalesHistoryPage() {
     }
   };
 
-  const handleSyncOfflineSales = async () => {
-    try {
-      setIsSynchronizingOfflineSales(true);
-      setErrorMessage("");
-      setNotice({ type: "", message: "" });
-
-      const localSales = await getOfflineSales();
-      const syncableSales = localSales.filter((sale) =>
-        ["pending", "failed"].includes(sale.syncStatus)
-      );
-
-      if (!syncableSales.length) {
-        setNotice({
-          type: "info",
-          message: "Aucune vente offline a synchroniser.",
-        });
-        return;
-      }
-
-      for (const sale of syncableSales) {
-        await updateSaleStatus(sale.localId, "syncing", null);
-        await loadOfflineSalesState();
-
-        const hasKnownCustomer = Number(sale.clientId || 0) > 0;
-        const payload = {
-          storeId: sale.storeId,
-          caisseId: sale.caisseId || sale.cashRegisterId,
-          paymentMethod: sale.paymentMethod,
-          paidAmount: sale.paidAmount,
-          remainingAmount: sale.remainingAmount,
-          total: sale.total,
-          items: (sale.items || []).map((item) => ({
-            productId: item.productId,
-            quantity: item.quantity,
-            unitPrice: item.unitPrice,
-          })),
-          ...(hasKnownCustomer
-            ? {
-                clientId: sale.clientId,
-              }
-            : {}),
-        };
-
-        try {
-          await api.post("/sales", payload);
-          await markSaleAsSynced(sale.localId);
-          invalidateDomainCaches(
-            "sales:",
-            "sales-sessions:",
-            "products:",
-            "stock:",
-            "stock-alerts",
-            "analytics:",
-            "stores"
-          );
-        } catch (error) {
-          const syncErrorMessage =
-            error.response?.data?.message ||
-            error.response?.data?.error ||
-            error.message ||
-            "Erreur de synchronisation";
-          await markSaleAsFailed(sale.localId, syncErrorMessage);
-        }
-
-        await loadOfflineSalesState();
-      }
-
-      await fetchPageData();
-      window.dispatchEvent(new CustomEvent("sportzone:sales-updated"));
-      setNotice({
-        type: "success",
-        message: "Synchronisation des ventes offline terminee.",
-      });
-    } catch (error) {
-      setNotice({
-        type: "error",
-        message:
-          error.message ||
-          "Impossible de synchroniser les ventes offline pour le moment.",
-      });
-    } finally {
-      setIsSynchronizingOfflineSales(false);
-    }
-  };
-
   const canCancelSale = (sale) =>
-    !sale?.localOnly && isAdmin && sale?.status === "completed";
+    isAdmin && sale?.status === "completed";
 
   const canReturnSale = (sale) =>
-    !sale?.localOnly &&
     sale?.type !== "refund" &&
     sale?.status !== "cancelled" &&
     sale?.items?.some((item) => (item.remainingReturnQuantity ?? item.quantity ?? 0) > 0);
 
   const canAddPaymentSale = (sale) =>
-    !sale?.localOnly &&
     sale?.type !== "refund" &&
     Number(sale?.remainingAmount || 0) > 0 &&
     ["credit", "partial"].includes(sale?.paymentMethod);
@@ -1474,18 +1289,6 @@ function SalesHistoryPage() {
               <div className="table-action-row">
                 {refundSelectionMode ? (
                   <Badge tone="info">Selection facture remboursement</Badge>
-                ) : null}
-                {hasSyncableOfflineSales ? (
-                  <button
-                    className="secondary-button"
-                    type="button"
-                    onClick={handleSyncOfflineSales}
-                    disabled={isSynchronizingOfflineSales}
-                  >
-                    {isSynchronizingOfflineSales
-                      ? "Synchronisation..."
-                      : "Synchroniser les ventes offline"}
-                  </button>
                 ) : null}
               </div>
             )
@@ -1836,6 +1639,12 @@ function SalesHistoryPage() {
                     <span>Type</span>
                     <strong>{getSaleTypeMeta(selectedSale.type, selectedSale.total).label}</strong>
                   </div>
+                  {selectedSale.originalSale?.ticketNumber ? (
+                    <div className="detail-stat">
+                      <span>Vente d'origine</span>
+                      <strong>{selectedSale.originalSale.ticketNumber}</strong>
+                    </div>
+                  ) : null}
                   <div className="detail-stat">
                     <span>Paiement</span>
                     <strong>
@@ -1858,21 +1667,6 @@ function SalesHistoryPage() {
                     </>
                   ) : null}
                   <div className="detail-stat">
-                    <span>Sync</span>
-                    <strong>
-                      {getSyncStatusMeta(
-                        selectedSale.syncStatus,
-                        selectedSale.localOnly
-                      ).label}
-                    </strong>
-                  </div>
-                  {selectedSale.syncStatus === "failed" && selectedSale.syncError ? (
-                    <div className="detail-stat">
-                      <span>Erreur sync</span>
-                      <strong>{selectedSale.syncError}</strong>
-                    </div>
-                  ) : null}
-                  <div className="detail-stat">
                     <span>Numero client</span>
                     <strong>
                       {selectedSale.customerNumber
@@ -1891,15 +1685,13 @@ function SalesHistoryPage() {
                   <div className="detail-stat">
                     <span>Statut</span>
                     <strong>
-                      {selectedSale.localOnly
-                        ? "En attente sync"
-                        : getSaleStatusMeta(
-                            selectedSale.status,
-                            selectedSale.paymentMethod,
-                            selectedSale.type,
-                            selectedSale.total,
-                            selectedSale.paymentStatus
-                          ).label}
+                      {getSaleStatusMeta(
+                        selectedSale.status,
+                        selectedSale.paymentMethod,
+                        selectedSale.type,
+                        selectedSale.total,
+                        selectedSale.paymentStatus
+                      ).label}
                     </strong>
                   </div>
                   <div className="detail-stat">

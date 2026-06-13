@@ -343,6 +343,61 @@ const userPasswordUpdateSchema = z.object({
   newPassword: requiredString("Le nouveau mot de passe"),
 });
 
+const expenseCategorySchema = z
+  .string({
+    required_error: "La categorie est obligatoire.",
+    invalid_type_error: "La categorie doit etre une chaine valide.",
+  })
+  .trim()
+  .transform((value) => value.toUpperCase())
+  .refine(
+    (value) =>
+      [
+        "ELECTRICITE",
+        "EAU",
+        "LOYER",
+        "REPARATION",
+        "TRANSPORT",
+        "CARBURANT",
+        "INTERNET",
+        "SALAIRE",
+        "AUTRE",
+      ].includes(value),
+    "La categorie doit etre une valeur supportee."
+  );
+
+const expensePaymentMethodSchema = z
+  .string({
+    required_error: "Le mode de paiement est obligatoire.",
+    invalid_type_error: "Le mode de paiement doit etre une chaine valide.",
+  })
+  .trim()
+  .transform((value) => value.toUpperCase())
+  .refine(
+    (value) => ["ESPECE", "CARTE", "VIREMENT", "CHEQUE", "AUTRE"].includes(value),
+    "Le mode de paiement doit etre ESPECE, CARTE, VIREMENT, CHEQUE ou AUTRE."
+  );
+
+const expenseCreateSchema = z.object({
+  titre: requiredString("Le titre de la charge"),
+  categorie: expenseCategorySchema,
+  montant: positiveNumber("Le montant"),
+  dateCharge: requiredString("La date"),
+  modePaiement: expensePaymentMethodSchema,
+  pointDeVenteId: positiveInt("Le point de vente"),
+  description: optionalString("La description"),
+});
+
+const expenseUpdateSchema = z.object({
+  titre: requiredString("Le titre de la charge").optional(),
+  categorie: expenseCategorySchema.optional(),
+  montant: positiveNumber("Le montant").optional(),
+  dateCharge: requiredString("La date").optional(),
+  modePaiement: expensePaymentMethodSchema.optional(),
+  pointDeVenteId: positiveInt("Le point de vente").optional(),
+  description: optionalString("La description"),
+});
+
 const organisationCreateSchema = z.object({
   name: requiredString("Le nom de l'organisation"),
   adminName: requiredString("Le nom de l'admin"),
@@ -396,6 +451,8 @@ module.exports = {
   userCreateSchema,
   userUpdateSchema,
   userPasswordUpdateSchema,
+  expenseCreateSchema,
+  expenseUpdateSchema,
   organisationCreateSchema,
   organisationUpdateSchema,
   authRegisterSchema,

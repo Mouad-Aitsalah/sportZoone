@@ -1,8 +1,11 @@
 import axios from "axios";
 import { getAuthToken, logout } from "../store/authStore";
 
-const API_BASE_URL = process.env.REACT_APP_API_URL || "http://localhost:5000/api";
-console.log("API_BASE_URL =", API_BASE_URL);
+const DEFAULT_API_BASE_URL = "http://localhost:5001/api";
+const API_BASE_URL = (process.env.REACT_APP_API_URL || DEFAULT_API_BASE_URL).replace(
+  /\/+$/,
+  ""
+);
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -73,8 +76,7 @@ api.request = (configOrUrl, maybeConfig) => {
   return requestPromise;
 };
 
-const SUPPLIER_WRITE_BASE_URL =
-  API_BASE_URL.replace(/\/api\/?$/, "/suppliers") || "http://localhost:5000/suppliers";
+const SUPPLIER_WRITE_BASE_URL = API_BASE_URL.replace(/\/api\/?$/, "/suppliers");
 
 api.interceptors.request.use(
   (config) => {
@@ -107,13 +109,21 @@ api.interceptors.response.use(
   }
 );
 
+api.login = (payload, config = {}) => api.post("/auth/login", payload, config);
 api.getPurchases = (config = {}) => api.get("/purchases", config);
 api.getPurchaseById = (id, config = {}) => api.get(`/purchases/${id}`, config);
 api.createPurchase = (payload, config = {}) => api.post("/purchases", payload, config);
 api.updatePurchase = (id, payload, config = {}) =>
   api.put(`/purchases/${id}`, payload, config);
 api.deletePurchase = (id, config = {}) => api.delete(`/purchases/${id}`, config);
+api.getExpenses = (config = {}) => api.get("/expenses", config);
+api.createExpense = (payload, config = {}) => api.post("/expenses", payload, config);
+api.updateExpense = (id, payload, config = {}) => api.put(`/expenses/${id}`, payload, config);
+api.deleteExpense = (id, config = {}) => api.delete(`/expenses/${id}`, config);
+api.getSales = (config = {}) => api.get("/sales", config);
 api.createRefund = (payload, config = {}) => api.post("/refunds", payload, config);
+api.createFreeRefund = (payload, config = {}) => api.post("/sales/refund-free", payload, config);
+api.refundSale = (id, payload, config = {}) => api.post(`/sales/${id}/refund`, payload, config);
 api.getAvoirs = (config = {}) => api.get("/avoirs", config);
 api.getAvoirById = (id, config = {}) => api.get(`/avoirs/${id}`, config);
 api.createAvoir = (payload, config = {}) => api.post("/avoirs", payload, config);

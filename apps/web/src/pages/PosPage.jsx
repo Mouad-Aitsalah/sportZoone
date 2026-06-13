@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import Badge from "../components/Badge";
 import DataTable from "../components/DataTable";
 import Modal from "../components/Modal";
@@ -7,7 +6,6 @@ import PaymentModal from "../components/PaymentModal";
 import SectionCard from "../components/SectionCard";
 import api from "../services/api";
 import { cacheResources, hydrateCachedResource } from "../services/cacheService";
-import { getOfflineSales, savePendingSale } from "../services/offlineDb";
 import { getCurrentUser } from "../store/authStore";
 import { useCart } from "../store/cartStore";
 import {
@@ -57,20 +55,6 @@ const getCollection = (payload, keys = []) => {
   return [];
 };
 
-const getLocalDateKey = (value) => {
-  const date = new Date(value);
-
-  if (Number.isNaN(date.getTime())) {
-    return "";
-  }
-
-  return [
-    date.getFullYear(),
-    String(date.getMonth() + 1).padStart(2, "0"),
-    String(date.getDate()).padStart(2, "0"),
-  ].join("-");
-};
-
 const formatTimeValue = (value) => {
   if (!value) {
     return "-";
@@ -109,14 +93,7 @@ const getPaymentMethodMeta = (paymentMethod) => {
   return { label: "Especes", tone: "success" };
 };
 
-const getSaleStatusMeta = (status, localOnly = false, paymentStatus = null) => {
-  if (localOnly) {
-    return {
-      label: "Hors ligne",
-      tone: "warning",
-    };
-  }
-
+const getSaleStatusMeta = (status, paymentStatus = null) => {
   if (paymentStatus === "PARTIALLY_PAID") {
     return {
       label: "Partiellement payee",
@@ -133,7 +110,7 @@ const getSaleStatusMeta = (status, localOnly = false, paymentStatus = null) => {
 
   if (status === "refunded") {
     return {
-      label: "Remboursee",
+      label: "Remboursement",
       tone: "info",
     };
   }
@@ -144,7 +121,7 @@ const getSaleStatusMeta = (status, localOnly = false, paymentStatus = null) => {
   };
 };
 
-const getSessionStatusMeta = (status, hasOfflineOnly = false) => {
+const getSessionStatusMeta = (status) => {
   if (status === "FERMEE") {
     return {
       label: "Fermee",
@@ -159,52 +136,11 @@ const getSessionStatusMeta = (status, hasOfflineOnly = false) => {
     };
   }
 
-  if (hasOfflineOnly) {
-    return {
-      label: "Hors ligne",
-      tone: "warning",
-    };
-  }
-
   return {
     label: "Aucune session",
     tone: "info",
   };
 };
-
-const mapOfflineSaleToArchiveSale = (sale) => ({
-  id: `offline-${sale.localId}`,
-  ticketNumber: `LOCAL-${String(sale.localId || "")
-    .replace(/[^a-zA-Z0-9]/g, "")
-    .slice(0, 8)
-    .toUpperCase()}`,
-  date: sale.createdAt,
-  createdAt: sale.createdAt,
-  total: Number(sale.total || 0),
-  paymentMethod: sale.paymentMethod || "cash",
-  paidAmount: Number(sale.paidAmount || 0),
-  remainingAmount: Number(sale.remainingAmount || 0),
-  paymentStatus: sale.paymentStatus || "PAID",
-  status: "pending_sync",
-  localOnly: true,
-  cashRegisterName:
-    sale.caisseName ||
-    sale.cashRegisterName ||
-    (sale.caisseId || sale.cashRegisterId
-      ? `Caisse ${sale.caisseId || sale.cashRegisterId}`
-      : null),
-  cashierName: sale.cashierName || (sale.userId ? `Utilisateur ${sale.userId}` : null),
-  items: (sale.items || []).map((item) => ({
-    productId: item.productId,
-    variantId: item.variantId || null,
-    productName: item.productName || item.name || `Produit #${item.productId || "-"}`,
-    variantLabel: item.variantLabel || null,
-    quantity: item.quantity || 0,
-    unitPrice: item.unitPrice || 0,
-    subtotal:
-      item.subtotal || Number(item.quantity || 0) * Number(item.unitPrice || 0),
-  })),
-});
 
 const getActiveVariants = (product) =>
   (product?.variants || []).filter((variant) => variant.active);
@@ -254,9 +190,10 @@ const buildArchiveSaleRecord = ({
   remainingAmount = 0,
   paymentStatus = "PAID",
   status = "completed",
-  localOnly = false,
   cashRegisterName = null,
   cashierName = null,
+  originalSaleId = null,
+  originalSaleTicketNumber = null,
   saleItems = [],
 }) => ({
   id: saleId,
@@ -269,9 +206,15 @@ const buildArchiveSaleRecord = ({
   remainingAmount: Number(remainingAmount || 0),
   paymentStatus: paymentStatus || "PAID",
   status,
-  localOnly,
   cashRegisterName,
   cashierName,
+  originalSale:
+    originalSaleId || originalSaleTicketNumber
+      ? {
+          id: originalSaleId,
+          ticketNumber: originalSaleTicketNumber || null,
+        }
+      : null,
   items: buildArchiveSaleItems(saleItems),
 });
 
@@ -316,7 +259,7 @@ const buildCashSessionWithSale = (currentSession, nextSale, sessionMeta = {}) =>
 };
 
 function PosPage() {
-  const navigate = useNavigate();
+  const posPageShellRef = useRef(null);
   const [barcode, setBarcode] = useState("");
   const [products, setProducts] = useState([]);
   const [stores, setStores] = useState([]);
@@ -333,7 +276,6 @@ function PosPage() {
   const [isSearchingBarcode, setIsSearchingBarcode] = useState(false);
   const [isSubmittingSale, setIsSubmittingSale] = useState(false);
   const [currentCashSession, setCurrentCashSession] = useState(null);
-  const [offlineArchiveSales, setOfflineArchiveSales] = useState([]);
   const [isLoadingCashSession, setIsLoadingCashSession] = useState(false);
   const [isClosingCashSession, setIsClosingCashSession] = useState(false);
   const [selectedArchivedSale, setSelectedArchivedSale] = useState(null);
@@ -415,6 +357,32 @@ function PosPage() {
   }, [currentCashSession]);
 
   useEffect(() => {
+    const rootElement = posPageShellRef.current;
+
+    if (!rootElement || typeof window === "undefined") {
+      return undefined;
+    }
+
+    const updateAvailableHeight = () => {
+      const rect = rootElement.getBoundingClientRect();
+      const viewportPadding = 24;
+      const availableHeight = Math.max(
+        420,
+        Math.floor(window.innerHeight - rect.top - viewportPadding)
+      );
+
+      rootElement.style.setProperty("--pos-available-height", `${availableHeight}px`);
+    };
+
+    updateAvailableHeight();
+    window.addEventListener("resize", updateAvailableHeight);
+
+    return () => {
+      window.removeEventListener("resize", updateAvailableHeight);
+    };
+  }, []);
+
+  useEffect(() => {
     setPriceInputs((current) => {
       const next = {};
 
@@ -471,33 +439,6 @@ function PosPage() {
     [currentCashSessionCacheKey]
   );
 
-  const refreshOfflineArchiveSales = useCallback(async () => {
-    if (!activeStoreId || !activeCashRegisterId) {
-      setOfflineArchiveSales([]);
-      return;
-    }
-
-    try {
-      const offlineSales = await getOfflineSales();
-      const todayKey = getLocalDateKey(new Date());
-      const filteredOfflineSales = offlineSales
-        .filter((sale) => ["pending", "failed", "syncing"].includes(sale.syncStatus))
-        .filter((sale) => getLocalDateKey(sale.createdAt) === todayKey)
-        .filter((sale) => Number(sale.storeId || 0) === Number(activeStoreId || 0))
-        .filter(
-          (sale) =>
-            Number(sale.caisseId || sale.cashRegisterId || 0) ===
-            Number(activeCashRegisterId || 0)
-        )
-        .filter((sale) => Number(sale.userId || 0) === Number(currentUser?.id || 0))
-        .map(mapOfflineSaleToArchiveSale);
-
-      setOfflineArchiveSales(filteredOfflineSales);
-    } catch (error) {
-      setOfflineArchiveSales([]);
-    }
-  }, [activeCashRegisterId, activeStoreId, currentUser?.id]);
-
   const appendSaleToCurrentCashSession = useCallback(
     (saleRecord, sessionMeta = {}) => {
       setCachedCurrentCashSession((currentValue) =>
@@ -511,18 +452,14 @@ function PosPage() {
     [setCachedCurrentCashSession]
   );
 
-  const appendOfflineArchiveSale = useCallback((saleRecord) => {
-    setOfflineArchiveSales((currentValue) => mergeArchiveSale(currentValue, saleRecord));
-  }, []);
-
   const archiveSales = useMemo(
     () =>
-      [...(currentCashSession?.sales || []), ...offlineArchiveSales].sort(
+      [...(currentCashSession?.sales || [])].sort(
         (left, right) =>
           new Date(right.date || right.createdAt || 0).getTime() -
           new Date(left.date || left.createdAt || 0).getTime()
       ),
-    [currentCashSession, offlineArchiveSales]
+    [currentCashSession]
   );
 
   const archiveSummary = useMemo(
@@ -901,7 +838,6 @@ function PosPage() {
 
     if (!activeStoreId || !activeCashRegisterId) {
       setCachedCurrentCashSession(null);
-      setOfflineArchiveSales([]);
       setIsLoadingCashSession(false);
       return () => {
         isMounted = false;
@@ -916,7 +852,6 @@ function PosPage() {
     });
 
     setIsLoadingCashSession(true);
-    void refreshOfflineArchiveSales();
 
     async function loadCurrentCashSession() {
       const { hasCachedData, refreshPromise } = hydrateCachedResource({
@@ -969,7 +904,6 @@ function PosPage() {
     activeStoreId,
     currentCashSessionCacheKey,
     currentUser?.id,
-    refreshOfflineArchiveSales,
     setCachedCurrentCashSession,
   ]);
 
@@ -1044,14 +978,6 @@ function PosPage() {
     });
   }, []);
 
-  const generateLocalSaleId = () => {
-    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-      return crypto.randomUUID();
-    }
-
-    return `local-sale-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
-  };
-
   const buildSalePayload = (paymentConfig) => {
     const paymentMethod =
       typeof paymentConfig === "string"
@@ -1089,64 +1015,6 @@ function PosPage() {
     };
   };
 
-  const buildOfflineSalePayload = (paymentConfig, userId) => {
-    const paymentMethod =
-      typeof paymentConfig === "string"
-        ? paymentConfig
-        : paymentConfig?.paymentMethod || "cash";
-    const paidAmount =
-      typeof paymentConfig === "object" && paymentConfig?.paidAmount !== undefined
-        ? Number(paymentConfig.paidAmount)
-        : paymentMethod === "credit"
-          ? 0
-          : totalAmount;
-    const remainingAmount =
-      typeof paymentConfig === "object" && paymentConfig?.remainingAmount !== undefined
-        ? Number(paymentConfig.remainingAmount)
-        : paymentMethod === "credit"
-          ? totalAmount
-          : 0;
-    const paymentStatus =
-      paymentMethod === "partial"
-        ? "PARTIALLY_PAID"
-        : paymentMethod === "credit"
-          ? "CREDIT"
-          : "PAID";
-    const hasKnownCustomer =
-      Number(selectedCustomer?.customerNumber || 1) !== 1 &&
-      Number(selectedCustomer?.id || 0) > 0;
-
-    return {
-      localId: generateLocalSaleId(),
-      storeId: activeStoreId,
-      caisseId: activeCashRegisterId,
-      userId,
-      ...(hasKnownCustomer
-        ? {
-            clientId: selectedCustomer.id,
-          }
-        : {}),
-      items: items.map((item) => ({
-        productId: item.productId,
-        variantId: item.variantId,
-        productName: item.name,
-        variantLabel: item.variantLabel || null,
-        quantity: Number(item.quantity || 0),
-        unitPrice: Number(item.price || 0),
-        subtotal: roundMoneyValue(
-          Number(item.quantity || 0) * Number(item.price || 0)
-        ),
-      })),
-      total: roundMoneyValue(totalAmount),
-      paymentMethod,
-      paidAmount,
-      remainingAmount,
-      paymentStatus,
-      createdAt: new Date().toISOString(),
-      syncStatus: "pending",
-    };
-  };
-
   const closeVariantSelection = () => {
     setVariantSelection({
       isOpen: false,
@@ -1155,7 +1023,7 @@ function PosPage() {
     });
   };
 
-  const buildVariantCartItem = (product, variant, options = {}) => {
+  const buildVariantCartItem = (product, variant) => {
     const variantLabel = variant?.label || null;
     const salePrice = variant?.salePrice ?? product.salePrice ?? product.price ?? 0;
 
@@ -1171,17 +1039,14 @@ function PosPage() {
       barcode: variant?.barcode || product.barcode || "",
       price: salePrice,
       salePrice,
-      stock:
-        options.isOffline === true
-          ? Number.POSITIVE_INFINITY
-          : Number(variant?.stock ?? product.stock ?? 0),
+      stock: Number(variant?.stock ?? product.stock ?? 0),
       storeName: activeStoreName || product.storeName || null,
       active: product.active,
     };
   };
 
-  const addProductWithStockCheck = (product, variant, options = {}) => {
-    const cartItem = buildVariantCartItem(product, variant, options);
+  const addProductWithStockCheck = (product, variant) => {
+    const cartItem = buildVariantCartItem(product, variant);
     const existingItem = items.find((item) => item.id === cartItem.id);
     const currentQuantity = existingItem?.quantity || 0;
     const availableStock = cartItem.stock ?? existingItem?.stock ?? 0;
@@ -1210,12 +1075,8 @@ function PosPage() {
       message: shouldWarnNegativeStock
         ? `Attention : stock insuffisant pour ${cartItem.displayName}, le stock passera en negatif.`
         : refundMode
-          ? `${cartItem.displayName} ajoute au panier remboursement${
-              options.isOffline ? " depuis le cache hors ligne" : ""
-            }.`
-          : `${cartItem.displayName} ajoute au panier${
-              options.isOffline ? " depuis le cache hors ligne" : ""
-            }.`,
+          ? `${cartItem.displayName} ajoute au panier remboursement.`
+          : `${cartItem.displayName} ajoute au panier.`,
     });
     return true;
   };
@@ -1228,12 +1089,12 @@ function PosPage() {
     });
   };
 
-  const addProductEntryToCart = (product, options = {}) => {
+  const addProductEntryToCart = (product) => {
     const activeVariants = getActiveVariants(product);
     const selectedVariant = product.selectedVariant || null;
 
     if (selectedVariant) {
-      return addProductWithStockCheck(product, selectedVariant, options);
+      return addProductWithStockCheck(product, selectedVariant);
     }
 
     if (activeVariants.length > 1) {
@@ -1241,11 +1102,8 @@ function PosPage() {
       return false;
     }
 
-    return addProductWithStockCheck(product, activeVariants[0] || null, options);
+    return addProductWithStockCheck(product, activeVariants[0] || null);
   };
-
-  const addOfflineProductToCart = (product) =>
-    addProductEntryToCart(product, { isOffline: true });
 
   const ensureStoreSelected = () => {
     if (activeStoreId) {
@@ -1276,45 +1134,10 @@ function PosPage() {
     }
 
     if (!isOnline) {
-      const cachedProducts = getCachedProducts();
-
-      if (!cachedProducts.length) {
-        setNotice({
-          type: "warning",
-          message:
-            "Aucun produit disponible hors ligne. Rechargez l'application en ligne une fois.",
-        });
-        return;
-      }
-
-      const product = cachedProducts.find(
-        (item) =>
-          String(item.barcode || "").trim() === trimmedBarcode ||
-          (item.variants || []).some(
-            (variant) => String(variant.barcode || "").trim() === trimmedBarcode
-          )
-      );
-
-      if (!product) {
-        setNotice({
-          type: "error",
-          message: "Produit non disponible hors ligne.",
-        });
-        return;
-      }
-
-      const matchedVariant =
-        (product.variants || []).find(
-          (variant) => String(variant.barcode || "").trim() === trimmedBarcode
-        ) || null;
-      const added = matchedVariant
-        ? addProductWithStockCheck(product, matchedVariant, { isOffline: true })
-        : addOfflineProductToCart(product);
-
-      if (added) {
-        setBarcode("");
-      }
-
+      setNotice({
+        type: "error",
+        message: "Connexion requise pour scanner et vendre un article.",
+      });
       return;
     }
 
@@ -1403,7 +1226,10 @@ function PosPage() {
     }
 
     if (!isOnline) {
-      addOfflineProductToCart(matchedProduct);
+      setNotice({
+        type: "error",
+        message: "Connexion requise pour ajouter un article au panier.",
+      });
       return;
     }
 
@@ -1516,7 +1342,6 @@ function PosPage() {
         type: "success",
         message: "Journee cloturee. Une nouvelle session vide est maintenant ouverte.",
       });
-      void refreshOfflineArchiveSales();
     } catch (error) {
       setNotice({
         type: "error",
@@ -1578,7 +1403,6 @@ function PosPage() {
 
     try {
       setIsSubmittingSale(true);
-      console.log("TRY ONLINE SALE");
       const response = await api.post("/sales", salePayload);
       const saleResponse = response.data?.data || response.data?.sale || response.data || {};
       const ticketNumber =
@@ -1634,47 +1458,20 @@ function PosPage() {
       void refreshProducts();
       return true;
     } catch (error) {
-      console.error("Sale API rejected, switching to offline fallback", {
+      const backendMessage =
+        error.response?.data?.message ||
+        error.response?.data?.error ||
+        (typeof error.response?.data?.details === "string"
+          ? error.response.data.details
+          : "");
+
+      setNotice({
+        type: "error",
         message:
-          error.response?.data?.message ||
-          error.response?.data?.error ||
-          error.message,
-        status: error.response?.status || null,
-        details: error.response?.data || null,
-        payload: salePayload,
+          backendMessage ||
+          "Impossible d'enregistrer la vente sur le serveur. Verifiez la connexion puis reessayez.",
       });
-
-      const offlineSale = buildOfflineSalePayload(paymentConfig, userId);
-
-      try {
-        console.log("OFFLINE FALLBACK");
-        await savePendingSale(offlineSale);
-        appendOfflineArchiveSale(mapOfflineSaleToArchiveSale(offlineSale));
-        clearCart();
-        setIsPaymentOpen(false);
-        setNotice({
-          type: "success",
-          message: "Vente enregistree hors ligne.",
-        });
-        window.dispatchEvent(new CustomEvent("sportzone:sales-updated"));
-        return true;
-      } catch (offlineError) {
-        const backendMessage =
-          error.response?.data?.message ||
-          error.response?.data?.error ||
-          (typeof error.response?.data?.details === "string"
-            ? error.response.data.details
-            : "");
-
-        setNotice({
-          type: "error",
-          message:
-            backendMessage ||
-            offlineError.message ||
-            "Impossible de finaliser la vente. Veuillez reessayer.",
-        });
-        return false;
-      }
+      return false;
     } finally {
       setIsSubmittingSale(false);
     }
@@ -1692,11 +1489,18 @@ function PosPage() {
   };
 
   const handleEnableRefundMode = () => {
-    navigate("/sales", {
-      state: {
-        refundMode: true,
-        source: "pos",
-      },
+    if (isSubmittingRefund) {
+      return;
+    }
+
+    clearCart();
+    setIsPaymentOpen(false);
+    setRefundMode(true);
+    setRefundReason("");
+    setRefundPaymentMethod("cash");
+    setNotice({
+      type: "warning",
+      message: "Mode remboursement actif. Ajoutez les produits a rembourser.",
     });
   };
 
@@ -1720,6 +1524,15 @@ function PosPage() {
     const refundItemsSnapshot = items.map((item) => ({ ...item }));
 
     if (!refundMode) {
+      return;
+    }
+
+    if (!isOnline) {
+      setNotice({
+        type: "error",
+        message:
+          "Une connexion est requise pour enregistrer un remboursement libre.",
+      });
       return;
     }
 
@@ -1756,7 +1569,7 @@ function PosPage() {
       items: items.map((item) => ({
         productId: item.productId,
         variantId: item.variantId,
-        quantity: item.quantity,
+        quantity: Number(item.quantity || 0),
         unitPrice: Number(item.price || 0),
       })),
     };
@@ -1764,7 +1577,7 @@ function PosPage() {
     try {
       setIsSubmittingRefund(true);
 
-      const response = await api.createRefund(payload);
+      const response = await api.createFreeRefund(payload);
       const refundResponse =
         response.data?.refundSale || response.data?.sale || response.data?.data || response.data;
       const refundNumber =
@@ -1772,19 +1585,22 @@ function PosPage() {
         response.data?.refund?.numero ||
         response.data?.refunds?.[0]?.numero ||
         null;
-      const refundTotal = -Math.abs(totalAmount);
       const archiveSale = buildArchiveSaleRecord({
         saleId: refundResponse?.id || refundNumber || `refund-${Date.now()}`,
         ticketNumber: refundNumber || `AVOIR-${Date.now()}`,
         createdAt: refundResponse?.createdAt || new Date().toISOString(),
-        total: refundResponse?.total ?? refundTotal,
+        total: refundResponse?.total ?? -Math.abs(totalAmount),
         paymentMethod: refundResponse?.paymentMethod || refundPaymentMethod,
         paidAmount: 0,
         remainingAmount: 0,
-        paymentStatus: refundResponse?.paymentStatus || "PAID",
-        status: "refunded",
+        paymentStatus: refundResponse?.paymentStatus || "REFUNDED",
+        status: refundResponse?.status || "refunded",
         cashRegisterName: activeCashRegisterName,
         cashierName: currentUser?.name || null,
+        originalSaleId:
+          response.data?.originalSale?.id || refundResponse?.originalSaleId || null,
+        originalSaleTicketNumber:
+          response.data?.originalSale?.ticketNumber || null,
         saleItems: refundItemsSnapshot,
       });
 
@@ -1795,16 +1611,16 @@ function PosPage() {
         status: refundResponse?.sessionStatus || currentCashSessionRef.current?.status || "OUVERTE",
       });
       applyProductStockDelta(refundItemsSnapshot, 1);
-      clearCart();
-      setRefundMode(false);
-      setRefundReason("");
-      setRefundPaymentMethod("cash");
       setNotice({
         type: "success",
         message: refundNumber
           ? `Remboursement ${refundNumber} valide avec succes.`
           : "Remboursement valide avec succes.",
       });
+      clearCart();
+      setRefundMode(false);
+      setRefundReason("");
+      setRefundPaymentMethod("cash");
       invalidateDomainCaches(
         "products:",
         "sales:",
@@ -1887,7 +1703,7 @@ function PosPage() {
   };
 
   return (
-    <div className="pos-page-shell">
+    <div className="pos-page-shell" ref={posPageShellRef}>
       <div className="pos-page-heading">
         <h1 className="pos-page-title">POS / Caisse</h1>
         <span className={`app-badge ${isOnline ? "tone-success" : "tone-warning"}`}>
@@ -1895,400 +1711,383 @@ function PosPage() {
         </span>
       </div>
 
-      <div className="pos-layout">
-        <SectionCard
-          title="Scanner des produits"
-          description="Saisir un code-barres ou utiliser les raccourcis d'ajout rapide."
-        >
-          <div className={`inline-notice ${notice.type}`}>{notice.message}</div>
+      <div className="pos-main-shell">
+        <div className="pos-customer-card">
+          <div className="pos-customer-card-header">
+            <span className="pos-customer-card-title">Client</span>
+          </div>
 
-          <form className="pos-toolbar" onSubmit={handleAddByBarcode}>
-            <input
-              className="text-input"
-              type="text"
-              placeholder="Entrer ou scanner un code-barres"
-              value={barcode}
-              onChange={(event) => setBarcode(event.target.value)}
-            />
-            <button
-              className="primary-button"
-              type="submit"
-              disabled={isSearchingBarcode}
-            >
-              {isSearchingBarcode ? "Recherche..." : "Ajouter"}
-            </button>
-          </form>
+          {customerNotice.message ? (
+            <div className={`inline-notice ${customerNotice.type} pos-customer-notice`}>
+              {customerNotice.message}
+            </div>
+          ) : null}
 
-          <div className="product-hint-list pos-quick-product-grid">
-            {isLoadingProducts ? (
-              <div className="empty-state">
-                Chargement des produits rapides...
+          <div className="pos-customer-rows">
+            <div className="pos-customer-row pos-customer-select-row">
+              <label className="field-label pos-customer-inline-label" htmlFor="customer-select">
+                Client selectionne :
+              </label>
+              <select
+                id="customer-select"
+                className="text-input select-input pos-customer-select"
+                value={selectedCustomer?.id || DEFAULT_CUSTOMER.id}
+                onChange={(event) => handleCustomerSelection(event.target.value)}
+                disabled={isLoadingCustomers}
+              >
+                {selectableCustomers.map((customer) => (
+                  <option key={customer.id} value={customer.id}>
+                    #{customer.customerNumber} - {customer.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="pos-customer-row pos-customer-actions-row">
+              <input
+                id="customer-search"
+                className="text-input pos-customer-search"
+                type="text"
+                placeholder="Rechercher client..."
+                value={customerSearchTerm}
+                onChange={(event) => setCustomerSearchTerm(event.target.value)}
+              />
+              <button
+                className="ghost-button pos-customer-add-button"
+                type="button"
+                onClick={() => {
+                  setCustomerModalError("");
+                  setIsCustomerModalOpen(true);
+                }}
+              >
+                Ajouter client
+              </button>
+            </div>
+
+            {isLoadingCustomerCredit || Number(customerCredit) > 0 ? (
+              <div className="pos-customer-credit-line">
+                {isLoadingCustomerCredit
+                  ? "Credit : Chargement..."
+                  : `Credit : ${formatCurrencyDh(customerCredit || 0)}`}
               </div>
-            ) : (
-              products.map((product) => {
-                const activeVariants = getActiveVariants(product);
-                const hasSingleVariant = activeVariants.length === 1;
-                const shortVariantLabel = hasSingleVariant
-                  ? String(activeVariants[0]?.label || "-").slice(0, 36)
-                  : activeVariants.length > 1
-                    ? `${activeVariants.length} variantes`
-                    : "";
-
-                return (
-                  <div
-                    className="hint-card pos-quick-product-card"
-                    key={product.id}
-                    title={
-                      product.barcode
-                        ? `Code-barres: ${product.barcode}`
-                        : product.name
-                    }
-                  >
-                    <div className="pos-quick-product-head">
-                      <h3 title={product.name}>{product.name}</h3>
-                      <strong>{formatCurrencyDh(product.salePrice || 0)}</strong>
-                    </div>
-                    {shortVariantLabel ? (
-                      <p
-                        className="table-subtext pos-quick-product-variant"
-                        title={hasSingleVariant ? activeVariants[0]?.label || "-" : shortVariantLabel}
-                      >
-                        {shortVariantLabel}
-                      </p>
-                    ) : null}
-                    <div className="pos-quick-product-footer">
-                      <span
-                        className="pos-quick-product-barcode"
-                        title={product.barcode || "Sans code-barres"}
-                      >
-                        {product.barcode || "Sans code-barres"}
-                      </span>
-                      <button
-                        className="ghost-button small-button pos-quick-product-button"
-                        type="button"
-                        onClick={() => handleQuickAdd(product)}
-                        disabled={!product.active || isSearchingBarcode}
-                        aria-label={`Ajouter ${product.name}`}
-                      >
-                        +
-                      </button>
-                    </div>
-                  </div>
-                );
-              })
-            )}
+            ) : null}
           </div>
-        </SectionCard>
+        </div>
 
-        <SectionCard
-          title="Panier courant"
-          description={
-            refundMode
-              ? "Mode remboursement actif. Le panier fonctionne comme une vente classique, avec total negatif."
-              : "Verifier les quantites, les prix et le total avant paiement."
-          }
-          actions={
-            <button
-              className="ghost-button"
-              type="button"
-              onClick={handleClearCart}
-            >
-              Vider panier
-            </button>
-          }
-        >
-          <div className="cart-headline">
-            <span>Articles dans le panier</span>
-            <strong>{totalItems}</strong>
-          </div>
+        <div className="pos-layout">
+          <SectionCard
+            title="Scanner des produits"
+            description="Saisir un code-barres ou utiliser les raccourcis d'ajout rapide."
+            className="pos-products-panel"
+          >
+            <div className="pos-products-scroll">
+              <div className={`inline-notice ${notice.type}`}>{notice.message}</div>
 
-          {items.length ? (
-            <div className="cart-list">
-              {items.map((item) => (
-                <div className="cart-item" key={item.id}>
-                  <div className="cart-item-main">
-                    <strong>{item.displayName || item.name}</strong>
-                    {item.variantLabel ? (
-                      <span>{item.variantLabel}</span>
-                    ) : null}
-                    <span>{item.storeName || activeStoreName || "Magasin courant"}</span>
+              <form className="pos-toolbar" onSubmit={handleAddByBarcode}>
+                <input
+                  className="text-input"
+                  type="text"
+                  placeholder="Entrer ou scanner un code-barres"
+                  value={barcode}
+                  onChange={(event) => setBarcode(event.target.value)}
+                />
+                <button
+                  className="primary-button"
+                  type="submit"
+                  disabled={isSearchingBarcode}
+                >
+                  {isSearchingBarcode ? "Recherche..." : "Ajouter"}
+                </button>
+              </form>
+
+              <div className="product-hint-list pos-quick-product-grid">
+                {isLoadingProducts ? (
+                  <div className="empty-state">
+                    Chargement des produits rapides...
                   </div>
+                ) : (
+                  products.map((product) => {
+                    const activeVariants = getActiveVariants(product);
+                    const hasSingleVariant = activeVariants.length === 1;
+                    const shortVariantLabel = hasSingleVariant
+                      ? String(activeVariants[0]?.label || "-").slice(0, 36)
+                      : activeVariants.length > 1
+                        ? `${activeVariants.length} variantes`
+                        : "";
 
-                  <div className="cart-quantity-controls">
-                    <button
-                      className="quantity-button"
-                      type="button"
-                      onClick={() => decreaseQuantity(item.id)}
-                    >
-                      -
-                    </button>
-                    <input
-                      className="text-input cart-quantity-input"
-                      type="number"
-                      min="0"
-                      step="0.25"
-                      value={item.quantity}
-                      onChange={(event) =>
-                        handleUpdateCartQuantity(item, event.target.value)
-                      }
-                    />
-                    <button
-                      className="quantity-button"
-                      type="button"
-                      onClick={() => {
-                        const nextQuantity = roundPosQuantity(
-                          Number(item.quantity || 0) + POS_QUANTITY_STEP
-                        );
-
-                        increaseQuantity(item.id);
-
-                        if (!refundMode && nextQuantity > Number(item.stock ?? 0)) {
-                          setNotice({
-                            type: "warning",
-                            message: `Attention : stock insuffisant pour ${
-                              item.displayName || item.name
-                            }, le stock passera en negatif.`,
-                          });
-                          return;
+                    return (
+                      <div
+                        className="hint-card pos-quick-product-card"
+                        key={product.id}
+                        title={
+                          product.barcode
+                            ? `Code-barres: ${product.barcode}`
+                            : product.name
                         }
-
-                        setNotice({ type: "", message: "" });
-                      }}
-                    >
-                      +
-                    </button>
-                  </div>
-
-                  <div className="cart-price-block">
-                    <label className="field-label" htmlFor={`cart-price-${item.id}`}>
-                      Prix
-                    </label>
-                    <input
-                      id={`cart-price-${item.id}`}
-                      className="text-input cart-price-input"
-                      type="number"
-                      min="0.01"
-                      step="0.01"
-                      value={priceInputs[item.id] ?? String(item.price ?? "")}
-                      onChange={(event) =>
-                        handlePriceInputChange(item, event.target.value)
-                      }
-                      onBlur={() => handlePriceInputBlur(item)}
-                    />
-                    <strong>
-                      Sous-total: {formatCurrencyDh(
-                        roundMoneyValue(Number(item.quantity || 0) * Number(item.price || 0))
-                      )}
-                    </strong>
-                  </div>
-
-                  <button
-                    className="table-action-button danger"
-                    type="button"
-                    onClick={() => removeItem(item.id)}
-                  >
-                    Retirer
-                  </button>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="empty-state">
-              {refundMode
-                ? "Le panier remboursement est vide. Scannez un article pour demarrer le retour."
-                : "Le panier est vide. Scannez un article pour demarrer la vente."}
-            </div>
-          )}
-
-          <div className="cart-summary">
-            {refundMode ? (
-              <div className="inline-notice warning">
-                <Badge tone="danger">MODE REMBOURSEMENT</Badge>
-                <span>Chaque article valide augmentera automatiquement le stock.</span>
+                      >
+                        <div className="pos-quick-product-head">
+                          <h3 title={product.name}>{product.name}</h3>
+                          <strong>{formatCurrencyDh(product.salePrice || 0)}</strong>
+                        </div>
+                        {shortVariantLabel ? (
+                          <p
+                            className="table-subtext pos-quick-product-variant"
+                            title={hasSingleVariant ? activeVariants[0]?.label || "-" : shortVariantLabel}
+                          >
+                            {shortVariantLabel}
+                          </p>
+                        ) : null}
+                        <div className="pos-quick-product-footer">
+                          <span
+                            className="pos-quick-product-barcode"
+                            title={product.barcode || "Sans code-barres"}
+                          >
+                            {product.barcode || "Sans code-barres"}
+                          </span>
+                          <button
+                            className="ghost-button small-button pos-quick-product-button"
+                            type="button"
+                            onClick={() => handleQuickAdd(product)}
+                            disabled={!product.active || isSearchingBarcode}
+                            aria-label={`Ajouter ${product.name}`}
+                          >
+                            +
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
               </div>
-            ) : null}
-            <div className="summary-row">
-              <span>Produits</span>
-              <strong>{items.length}</strong>
             </div>
-            <div className="summary-row">
-              <span>Unites</span>
-              <strong>{totalItems}</strong>
-            </div>
-            <div className="summary-row grand-total">
-              <span>Total</span>
-              <span>{formatCurrencyDh(displayTotalAmount)}</span>
-            </div>
-            {refundMode ? (
-              <>
-                <div className="field-group">
-                  <label className="field-label" htmlFor="refund-payment-method">
-                    Mode de remboursement
-                  </label>
-                  <select
-                    id="refund-payment-method"
-                    className="text-input select-input"
-                    value={refundPaymentMethod}
-                    onChange={(event) => setRefundPaymentMethod(event.target.value)}
-                    disabled={isSubmittingRefund}
-                  >
-                    <option value="cash">Especes</option>
-                    <option value="card">Carte bancaire</option>
-                  </select>
-                </div>
+          </SectionCard>
 
-                <div className="field-group">
-                  <label className="field-label" htmlFor="refund-reason">
-                    Motif du remboursement
-                  </label>
-                  <textarea
-                    id="refund-reason"
-                    className="text-input"
-                    rows="3"
-                    value={refundReason}
-                    onChange={(event) => setRefundReason(event.target.value)}
-                    placeholder="Remboursement client"
-                    disabled={isSubmittingRefund}
-                  />
-                </div>
-              </>
-            ) : null}
-            <div className="action-row">
-              {refundMode ? (
-                <>
-                  <button
-                    className="ghost-button"
-                    type="button"
-                    onClick={handleCancelRefundMode}
-                    disabled={isSubmittingRefund}
-                  >
-                    Annuler remboursement
-                  </button>
-                  <button
-                    className="primary-button"
-                    type="button"
-                    onClick={handleSubmitRefund}
-                    disabled={isSubmittingRefund}
-                  >
-                    {isSubmittingRefund ? "Validation..." : "Valider remboursement"}
-                  </button>
-                </>
-              ) : (
-                <>
-                  <button
-                    className="ghost-button"
-                    type="button"
-                    onClick={handleEnableRefundMode}
-                  >
-                    Remboursement
-                  </button>
-                  <button
-                    className="secondary-button"
-                    type="button"
-                    onClick={handleOpenPayment}
-                  >
-                    Valider paiement
-                  </button>
-                </>
-              )}
+          <SectionCard
+            title="Panier courant"
+            description={
+              refundMode
+                ? "Mode remboursement actif. Le panier fonctionne comme une vente classique, avec total negatif."
+                : "Verifier les quantites, les prix et le total avant paiement."
+            }
+            className="pos-cart-panel"
+            actions={
               <button
                 className="ghost-button"
                 type="button"
-                onClick={() => window.print()}
+                onClick={handleClearCart}
               >
-                Imprimer ticket
+                Vider panier
               </button>
-            </div>
-          </div>
-        </SectionCard>
-      </div>
-
-      <SectionCard
-        title="Client"
-        description="Section compacte pour rattacher rapidement la vente au bon client."
-        actions={
-          <button
-            className="ghost-button"
-            type="button"
-            onClick={() => {
-              setCustomerModalError("");
-              setIsCustomerModalOpen(true);
-            }}
+            }
           >
-            Ajouter client
-          </button>
-        }
-      >
-        {customerNotice.message ? (
-          <div className={`inline-notice ${customerNotice.type}`}>
-            {customerNotice.message}
-          </div>
-        ) : null}
+            <div className="pos-cart-scroll">
+              <div className="cart-headline">
+                <span>Articles dans le panier</span>
+                <strong>{totalItems}</strong>
+              </div>
 
-        <div className="register-selector-grid customer-selector-grid">
-          <div className="field-group compact-field">
-            <label className="field-label" htmlFor="customer-search">
-              Recherche client
-            </label>
-            <input
-              id="customer-search"
-              className="text-input"
-              type="text"
-              placeholder="Rechercher par nom ou numero client"
-              value={customerSearchTerm}
-              onChange={(event) => setCustomerSearchTerm(event.target.value)}
-            />
-          </div>
+              {items.length ? (
+                <div className="cart-list">
+                  {items.map((item) => (
+                    <div className="cart-item" key={item.id}>
+                      <div className="cart-item-main">
+                        <strong>{item.displayName || item.name}</strong>
+                        {item.variantLabel ? (
+                          <span>{item.variantLabel}</span>
+                        ) : null}
+                        <span>{item.storeName || activeStoreName || "Magasin courant"}</span>
+                      </div>
 
-          <div className="field-group compact-field">
-            <label className="field-label" htmlFor="customer-select">
-              Client selectionne
-            </label>
-            <select
-              id="customer-select"
-              className="text-input select-input"
-              value={selectedCustomer?.id || DEFAULT_CUSTOMER.id}
-              onChange={(event) => handleCustomerSelection(event.target.value)}
-              disabled={isLoadingCustomers}
-            >
-              {selectableCustomers.map((customer) => (
-                <option key={customer.id} value={customer.id}>
-                  #{customer.customerNumber} - {customer.name}
-                </option>
-              ))}
-            </select>
-          </div>
+                      <div className="cart-quantity-controls">
+                        <button
+                          className="quantity-button"
+                          type="button"
+                          onClick={() => decreaseQuantity(item.id)}
+                        >
+                          -
+                        </button>
+                        <input
+                          className="text-input cart-quantity-input"
+                          type="number"
+                          min="0"
+                          step="0.25"
+                          value={item.quantity}
+                          onChange={(event) =>
+                            handleUpdateCartQuantity(item, event.target.value)
+                          }
+                        />
+                        <button
+                          className="quantity-button"
+                          type="button"
+                          onClick={() => {
+                            const nextQuantity = roundPosQuantity(
+                              Number(item.quantity || 0) + POS_QUANTITY_STEP
+                            );
+
+                            increaseQuantity(item.id);
+
+                            if (!refundMode && nextQuantity > Number(item.stock ?? 0)) {
+                              setNotice({
+                                type: "warning",
+                                message: `Attention : stock insuffisant pour ${
+                                  item.displayName || item.name
+                                }, le stock passera en negatif.`,
+                              });
+                              return;
+                            }
+
+                            setNotice({ type: "", message: "" });
+                          }}
+                        >
+                          +
+                        </button>
+                      </div>
+
+                      <div className="cart-price-block">
+                        <label className="field-label" htmlFor={`cart-price-${item.id}`}>
+                          Prix
+                        </label>
+                        <input
+                          id={`cart-price-${item.id}`}
+                          className="text-input cart-price-input"
+                          type="number"
+                          min="0.01"
+                          step="0.01"
+                          value={priceInputs[item.id] ?? String(item.price ?? "")}
+                          onChange={(event) =>
+                            handlePriceInputChange(item, event.target.value)
+                          }
+                          onBlur={() => handlePriceInputBlur(item)}
+                        />
+                        <strong>
+                          Sous-total: {formatCurrencyDh(
+                            roundMoneyValue(Number(item.quantity || 0) * Number(item.price || 0))
+                          )}
+                        </strong>
+                      </div>
+
+                      <button
+                        className="table-action-button danger"
+                        type="button"
+                        onClick={() => removeItem(item.id)}
+                      >
+                        Retirer
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="empty-state">
+                  {refundMode
+                    ? "Le panier remboursement est vide. Scannez un article pour demarrer le retour."
+                    : "Le panier est vide. Scannez un article pour demarrer la vente."}
+                </div>
+              )}
+
+              <div className="cart-summary">
+                {refundMode ? (
+                  <div className="inline-notice warning">
+                    <Badge tone="danger">MODE REMBOURSEMENT</Badge>
+                    <span>Chaque article valide augmentera automatiquement le stock.</span>
+                  </div>
+                ) : null}
+                <div className="summary-row">
+                  <span>Produits</span>
+                  <strong>{items.length}</strong>
+                </div>
+                <div className="summary-row">
+                  <span>Unites</span>
+                  <strong>{totalItems}</strong>
+                </div>
+                <div className="summary-row grand-total">
+                  <span>Total</span>
+                  <span>{formatCurrencyDh(displayTotalAmount)}</span>
+                </div>
+                {refundMode ? (
+                  <>
+                    <div className="field-group">
+                      <label className="field-label" htmlFor="refund-payment-method">
+                        Mode de remboursement
+                      </label>
+                      <select
+                        id="refund-payment-method"
+                        className="text-input select-input"
+                        value={refundPaymentMethod}
+                        onChange={(event) => setRefundPaymentMethod(event.target.value)}
+                        disabled={isSubmittingRefund}
+                      >
+                        <option value="cash">Especes</option>
+                        <option value="card">Carte bancaire</option>
+                      </select>
+                    </div>
+
+                    <div className="field-group">
+                      <label className="field-label" htmlFor="refund-reason">
+                        Motif du remboursement
+                      </label>
+                      <textarea
+                        id="refund-reason"
+                        className="text-input"
+                        rows="3"
+                        value={refundReason}
+                        onChange={(event) => setRefundReason(event.target.value)}
+                        placeholder="Remboursement client"
+                        disabled={isSubmittingRefund}
+                      />
+                    </div>
+                  </>
+                ) : null}
+                <div className="action-row">
+                  {refundMode ? (
+                    <>
+                      <button
+                        className="ghost-button"
+                        type="button"
+                        onClick={handleCancelRefundMode}
+                        disabled={isSubmittingRefund}
+                      >
+                        Annuler remboursement
+                      </button>
+                      <button
+                        className="primary-button"
+                        type="button"
+                        onClick={handleSubmitRefund}
+                        disabled={isSubmittingRefund}
+                      >
+                        {isSubmittingRefund ? "Validation..." : "Valider remboursement"}
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        className="ghost-button"
+                        type="button"
+                        onClick={handleEnableRefundMode}
+                      >
+                        Remboursement
+                      </button>
+                      <button
+                        className="secondary-button"
+                        type="button"
+                        onClick={handleOpenPayment}
+                      >
+                        Valider paiement
+                      </button>
+                    </>
+                  )}
+                  <button
+                    className="ghost-button"
+                    type="button"
+                    onClick={() => window.print()}
+                  >
+                    Imprimer ticket
+                  </button>
+                </div>
+              </div>
+            </div>
+          </SectionCard>
         </div>
-
-        <div className="register-context-grid customer-context-grid">
-          <div className="detail-stat">
-            <span>Numero client</span>
-            <strong>#{selectedCustomer?.customerNumber || 1}</strong>
-          </div>
-          <div className="detail-stat">
-            <span>Nom client</span>
-            <strong>{selectedCustomer?.name || DEFAULT_CUSTOMER.name}</strong>
-          </div>
-          <div className="detail-stat">
-            <span>Credit client</span>
-            <strong>
-              {isLoadingCustomerCredit
-                ? "Chargement..."
-                : formatCurrencyDh(customerCredit || 0)}
-            </strong>
-          </div>
-        </div>
-
-        <div className="customer-credit-row">
-          {Number(customerCredit) > 0 ? (
-            <span className="app-badge tone-stock-warning">
-              Credit client: {formatCurrencyDh(customerCredit)}
-            </span>
-          ) : (
-            <span className="app-badge tone-success">Aucun credit</span>
-          )}
-        </div>
-      </SectionCard>
+      </div>
 
       <SectionCard
         title="Session du jour"
@@ -2300,9 +2099,9 @@ function PosPage() {
         actions={
           <div className="table-action-row">
             <Badge
-              tone={getSessionStatusMeta(currentCashSession?.status, offlineArchiveSales.length > 0).tone}
+              tone={getSessionStatusMeta(currentCashSession?.status).tone}
             >
-              {getSessionStatusMeta(currentCashSession?.status, offlineArchiveSales.length > 0).label}
+              {getSessionStatusMeta(currentCashSession?.status).label}
             </Badge>
             <button
               className="primary-button"
@@ -2323,8 +2122,7 @@ function PosPage() {
           <div className="detail-stat">
             <span>Session actuelle</span>
             <strong>
-              {currentCashSession?.sessionNumber ||
-                (offlineArchiveSales.length ? "Archive locale hors ligne" : "Aucune session")}
+              {currentCashSession?.sessionNumber || "Aucune session"}
             </strong>
           </div>
           <div className="detail-stat">
@@ -2350,9 +2148,7 @@ function PosPage() {
                 ? "Ouverte"
                 : currentCashSession?.status === "FERMEE"
                   ? "Fermee"
-                  : offlineArchiveSales.length
-                    ? "Hors ligne"
-                    : "Aucune session"}
+                  : "Aucune session"}
             </strong>
           </div>
         </div>
@@ -2486,12 +2282,17 @@ function PosPage() {
                   {
                     getSaleStatusMeta(
                       selectedArchivedSale.status,
-                      selectedArchivedSale.localOnly,
                       selectedArchivedSale.paymentStatus
                     ).label
                   }
                 </strong>
               </div>
+              {selectedArchivedSale.originalSale?.ticketNumber ? (
+                <div className="detail-stat">
+                  <span>Vente d'origine</span>
+                  <strong>{selectedArchivedSale.originalSale.ticketNumber}</strong>
+                </div>
+              ) : null}
               {Number(selectedArchivedSale.paidAmount || 0) > 0 &&
               Number(selectedArchivedSale.paidAmount || 0) !==
                 Number(selectedArchivedSale.total || 0) ? (

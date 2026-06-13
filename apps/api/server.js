@@ -16,6 +16,7 @@ const requestLoggerMiddleware = require("./src/middlewares/requestLoggerMiddlewa
 const notFoundMiddleware = require("./src/middlewares/notFoundMiddleware");
 const errorHandlerMiddleware = require("./src/middlewares/errorHandlerMiddleware");
 const authMiddleware = require("./src/middlewares/authMiddleware");
+const { ensureSuperAdmin } = require("./src/bootstrap/ensureSuperAdmin");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -54,11 +55,24 @@ app.get('/health', (req, res) => {
 app.use(notFoundMiddleware);
 app.use(errorHandlerMiddleware);
 
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-  startDailyReportJob();
-});
+async function startServer() {
+  try {
+    const bootstrapResult = await ensureSuperAdmin();
 
+    app.listen(PORT, () => {
+      console.log(`Server is running on port ${PORT}`);
+      console.log(
+        `Super admin ready: ${bootstrapResult.superAdmin.email} (${bootstrapResult.superAdmin.role})`
+      );
+      startDailyReportJob();
+    });
+  } catch (error) {
+    console.error("Failed to bootstrap Super Admin:", error);
+    process.exit(1);
+  }
+}
+
+startServer();
 
 
 

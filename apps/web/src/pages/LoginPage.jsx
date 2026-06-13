@@ -48,20 +48,26 @@ function LoginPage() {
       setIsLoading(true);
       setErrorMessage("");
 
-      const response = await api.post("/auth/login", {
-        email: formData.email,
+      const response = await api.login({
+        email: formData.email.trim(),
         password: formData.password,
       });
-      const { token, user } = response.data;
-      const nextPath = resolveNextPath(user?.role, redirectPath);
+      const { token, user } = response.data || {};
 
-      saveAuthSession(token, user);
+      if (!token || !user) {
+        throw new Error("INVALID_AUTH_RESPONSE");
+      }
+
+      const authSession = saveAuthSession(token, user);
+      const nextPath = resolveNextPath(authSession.user?.role, redirectPath);
       navigate(nextPath, { replace: true });
     } catch (error) {
-      if (false) {
-        setErrorMessage(
-          "Votre demande d'accès a été envoyée. Attendez la validation de l'administrateur."
-        );
+      const backendMessage = error.response?.data?.message;
+
+      if (backendMessage) {
+        setErrorMessage(backendMessage);
+      } else if (error.message === "INVALID_AUTH_RESPONSE") {
+        setErrorMessage("La reponse du serveur apres connexion est invalide.");
       } else {
         setErrorMessage("Email ou mot de passe incorrect.");
       }
@@ -122,9 +128,7 @@ function LoginPage() {
             Connectez-vous avec votre compte pour acceder au dashboard.
           </p>
 
-          {errorMessage ? (
-            <div className="inline-notice error">{errorMessage}</div>
-          ) : null}
+          {errorMessage ? <div className="inline-notice error">{errorMessage}</div> : null}
 
           <form className="form-grid" onSubmit={handleSubmit}>
             <div className="field-group">

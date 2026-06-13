@@ -71,7 +71,7 @@ function DashboardPage() {
         setIsLoading(!hasCachedData);
         setErrorMessage("");
 
-        const [analyticsResponse, alertsResponse, storesResponse] = await Promise.all([
+        const [analyticsResult, alertsResult, storesResult] = await Promise.allSettled([
           api.get("/analytics", {
             params: { period },
           }),
@@ -80,16 +80,50 @@ function DashboardPage() {
         ]);
 
         if (isMounted) {
-          const nextAnalytics = analyticsResponse.data || null;
-          const nextAlerts = Array.isArray(alertsResponse.data) ? alertsResponse.data : [];
-          const nextStores = getStoresCollection(storesResponse.data);
+          const analyticsError =
+            analyticsResult.status === "rejected" ? analyticsResult.reason : null;
+          const alertsError = alertsResult.status === "rejected" ? alertsResult.reason : null;
+          const storesError = storesResult.status === "rejected" ? storesResult.reason : null;
 
-          setAnalytics(nextAnalytics);
-          setAlerts(nextAlerts);
-          setStores(nextStores);
-          writeCache(CACHE_KEYS.analytics(period), nextAnalytics);
-          writeCache(CACHE_KEYS.stockAlerts(), nextAlerts);
-          writeCache(CACHE_KEYS.stores(), nextStores);
+          if (analyticsResult.status === "fulfilled") {
+            const nextAnalytics = analyticsResult.value.data || null;
+            setAnalytics(nextAnalytics);
+            writeCache(CACHE_KEYS.analytics(period), nextAnalytics);
+          } else if (!analyticsCache) {
+            setAnalytics(null);
+          }
+
+          if (alertsResult.status === "fulfilled") {
+            const nextAlerts = Array.isArray(alertsResult.value.data)
+              ? alertsResult.value.data
+              : [];
+            setAlerts(nextAlerts);
+            writeCache(CACHE_KEYS.stockAlerts(), nextAlerts);
+          } else if (!alertsCache) {
+            setAlerts([]);
+          }
+
+          if (storesResult.status === "fulfilled") {
+            const nextStores = getStoresCollection(storesResult.value.data);
+            setStores(nextStores);
+            writeCache(CACHE_KEYS.stores(), nextStores);
+          } else if (!storesCache) {
+            setStores([]);
+          }
+
+          if (analyticsError && !hasCachedData) {
+            setErrorMessage(
+              analyticsError.response?.data?.message ||
+                "Impossible de charger les donnees principales du dashboard."
+            );
+          }
+
+          if (alertsError || storesError) {
+            console.error("Dashboard secondary requests failed", {
+              alertsError,
+              storesError,
+            });
+          }
         }
       } catch (error) {
         if (isMounted && !hasCachedData) {
@@ -200,6 +234,14 @@ function DashboardPage() {
           : organisationName,
         detail: `${formatCurrencyDh(resolvedBestStore?.revenue || analytics?.revenue || 0)} sur la periode.`,
         tone: "warning",
+      },
+      {
+        label: "Charges du mois",
+        value: isLoading
+          ? "Chargement..."
+          : formatCurrencyDh(analytics?.currentMonthExpenses || 0),
+        detail: "Total des depenses du mois courant.",
+        tone: "danger",
       },
     ],
     [analytics, isLoading, organisationName, period, resolvedBestStore]

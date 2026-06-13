@@ -3,12 +3,23 @@ const jwt = require("jsonwebtoken");
 const prisma = require("../config/prisma");
 const { validateSchema } = require("../utils/validation");
 const { getOrganisationIdFromUser } = require("../utils/organisationScope");
+const { hasRequiredRole } = require("../utils/roleUtils");
 const {
   authRegisterSchema,
   authLoginSchema,
 } = require("../utils/validationSchemas");
 
-const mapRoleForApi = (role) => (role === "ADMIN" ? "admin" : "employe");
+const mapRoleForApi = (role) => {
+  if (role === "SUPER_ADMIN") {
+    return "super_admin";
+  }
+
+  if (role === "ADMIN_GLOBAL") {
+    return "admin_global";
+  }
+
+  return role === "ADMIN" ? "admin" : "employe";
+};
 
 const userInclude = {
   pointDeVente: {
@@ -86,7 +97,11 @@ const getAdminRequester = async (req) => {
       },
     });
 
-    if (requester && requester.estActif && requester.role === "ADMIN") {
+    if (
+      requester &&
+      requester.estActif &&
+      hasRequiredRole(requester.role, ["ADMIN"])
+    ) {
       return requester;
     }
 
@@ -279,6 +294,8 @@ const register = async (req, res) => {
         motDePasse: hashedPassword,
         organisationId,
         role: userRole,
+        approvalStatus: "APPROVED",
+        estActif: true,
         pointDeVenteId: parsedPointDeVenteId,
         caisseId: parsedCaisseId,
       },
@@ -305,7 +322,10 @@ const register = async (req, res) => {
 
 const login = async (req, res) => {
   try {
-    const { email, motDePasse } = validateSchema(authLoginSchema, req.body);
+    const { email, motDePasse } = validateSchema(authLoginSchema, {
+      email: req.body?.email,
+      motDePasse: req.body?.motDePasse ?? req.body?.password,
+    });
     const normalizedEmail = normalizeRequiredString(email).toLowerCase();
     const rawPassword = String(motDePasse || "");
 

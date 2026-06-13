@@ -23,6 +23,18 @@ const buildVariantLabel = (variant) => {
   return [variant?.taille, variant?.couleur].filter(Boolean).join(" / ");
 };
 
+const getProductVariants = (product) => {
+  const variantsSource = Array.isArray(product?.variants)
+    ? product.variants
+    : Array.isArray(product?.variantes)
+    ? product.variantes
+    : Array.isArray(product?.productVariants)
+    ? product.productVariants
+    : [];
+
+  return variantsSource.filter((variant) => (variant?.active ?? variant?.actif ?? true) !== false);
+};
+
 const createEmptyPurchaseLine = () => ({
   rowId: `purchase-line-${Date.now()}-${Math.random().toString(16).slice(2)}`,
   productId: "",
@@ -84,8 +96,7 @@ const normalizeProductEntries = (product) => {
       product?.retailPrice ?? product?.prixDetail ?? product?.salePrice ?? product?.prixVente ?? 0
     ),
   };
-  const variants = Array.isArray(product?.variantes) ? product.variantes : [];
-  const activeVariants = variants.filter((variant) => variant?.actif !== false);
+  const activeVariants = getProductVariants(product);
 
   if (!activeVariants.length) {
     return [
@@ -106,10 +117,16 @@ const normalizeProductEntries = (product) => {
       variantId: Number(variant?.id),
       variantLabel,
       displayName: `${baseProduct.name} - ${variantLabel}`,
-      barcode: variant?.codeBarres || baseProduct.barcode,
-      purchasePrice: Number(variant?.prixAchat ?? baseProduct.purchasePrice),
+      barcode: variant?.barcode || variant?.codeBarres || baseProduct.barcode,
+      purchasePrice: Number(
+        variant?.purchasePrice ?? variant?.prixAchat ?? baseProduct.purchasePrice
+      ),
       retailPrice: Number(
-        variant?.prixVente ?? variant?.prixDetail ?? baseProduct.retailPrice
+        variant?.retailPrice ??
+          variant?.salePrice ??
+          variant?.prixDetail ??
+          variant?.prixVente ??
+          baseProduct.retailPrice
       ),
     };
   });
@@ -123,7 +140,9 @@ const normalizeStore = (store) => ({
 const normalizePurchaseLine = (line) => ({
   id: line?.id || `line-${Date.now()}`,
   productId: Number(line?.productId ?? line?.produitId ?? 0),
+  variantId: line?.variantId ?? line?.varianteId ?? null,
   productName: line?.productName || line?.produitNom || line?.product?.name || "-",
+  variantLabel: line?.variantLabel || line?.varianteNom || "",
   quantity: Number(line?.quantity ?? line?.quantite ?? 0),
   purchasePriceHT: Number(
     line?.purchasePriceHT ?? line?.prixAchatUnitaireHT ?? line?.purchasePrice ?? 0
@@ -1030,7 +1049,9 @@ function PurchasesPage() {
               emptyDescription="Cet achat ne contient aucune ligne produit."
               renderRow={(line) => (
                 <tr key={line.id}>
-                  <td>{line.productName}</td>
+                  <td>
+                    {[line.productName, line.variantLabel].filter(Boolean).join(" - ")}
+                  </td>
                   <td>{line.quantity}</td>
                   <td>{formatCurrencyDh(line.purchasePriceHT)}</td>
                   <td>{formatCurrencyDh(line.totalHT)}</td>

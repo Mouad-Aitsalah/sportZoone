@@ -326,6 +326,7 @@ const createUser = async (req, res) => {
         motDePasse: hashedPassword,
         role: normalizedRole,
         estActif: parsedEstActif,
+        approvalStatus: "APPROVED",
         pointDeVenteId: parsedPointDeVenteId,
         caisseId: parsedCaisseId,
       },

@@ -51,6 +51,10 @@ const {
   sumVariantStock,
   toApiVariant,
 } = require("../services/productVariantService");
+const {
+  isPrismaMissingColumnError,
+  logPrismaCompatFallback,
+} = require("../utils/prismaCompat");
 
 const isBlankString = (value) => typeof value === "string" && value.trim() === "";
 
@@ -3541,6 +3545,114 @@ const createSale = async (req, res) => {
   }
 };
 
+const buildSalesSelect = (includeOriginalSaleLink = true) => ({
+  id: true,
+  numeroTicket: true,
+  dateVente: true,
+  paymentMethod: true,
+  paidAmount: true,
+  remainingAmount: true,
+  paymentStatus: true,
+  status: true,
+  total: true,
+  pointDeVenteId: true,
+  caisseId: true,
+  utilisateurId: true,
+  clientId: true,
+  ...(includeOriginalSaleLink ? { originalSaleId: true } : {}),
+  sessionCaisseId: true,
+  pointDeVente: {
+    select: {
+      id: true,
+      nom: true,
+    },
+  },
+  caisse: {
+    select: {
+      id: true,
+      nom: true,
+    },
+  },
+  utilisateur: {
+    select: {
+      id: true,
+      nom: true,
+    },
+  },
+  client: {
+    select: {
+      id: true,
+      numeroClient: true,
+      nom: true,
+      credit: true,
+      compte: {
+        select: {
+          id: true,
+          nom: true,
+        },
+      },
+    },
+  },
+  ...(includeOriginalSaleLink
+    ? {
+        originalSale: {
+          select: {
+            id: true,
+            numeroTicket: true,
+            dateVente: true,
+          },
+        },
+      }
+    : {}),
+  sessionCaisse: {
+    select: {
+      id: true,
+      numeroSession: true,
+      statut: true,
+      dateOuverture: true,
+      dateFermeture: true,
+    },
+  },
+  lignes: {
+    orderBy: {
+      id: "asc",
+    },
+    select: {
+      produitId: true,
+      varianteId: true,
+      quantite: true,
+      prixUnitaire: true,
+      sousTotal: true,
+      produit: {
+        select: {
+          id: true,
+          nom: true,
+          prixAchat: true,
+        },
+      },
+      variante: {
+        select: {
+          id: true,
+          taille: true,
+          couleur: true,
+          valeursVariante: true,
+          prixAchat: true,
+        },
+      },
+    },
+  },
+  retours: {
+    select: {
+      id: true,
+      produitId: true,
+      varianteId: true,
+      quantite: true,
+      raison: true,
+      createdAt: true,
+    },
+  },
+});
+
 const getSales = async (req, res) => {
   const organisationId = getOrganisationIdFromUser(req.user);
   const requestedPaymentMethod = normalizeOptionalString(req.query.paymentMethod);
@@ -3578,112 +3690,35 @@ const getSales = async (req, res) => {
       : {}),
   };
   const { page, limit, skip } = getPaginationParams(req.query);
-  const [total, sales] = await Promise.all([
-    prisma.vente.count({ where }),
-    prisma.vente.findMany({
-      where,
-      select: {
-        id: true,
-        numeroTicket: true,
-        dateVente: true,
-        paymentMethod: true,
-        paidAmount: true,
-        remainingAmount: true,
-        paymentStatus: true,
-        status: true,
-        total: true,
-        pointDeVenteId: true,
-        caisseId: true,
-        utilisateurId: true,
-        clientId: true,
-        sessionCaisseId: true,
-        pointDeVente: {
-          select: {
-            id: true,
-            nom: true,
-          },
+  const fetchSalesPage = async (includeOriginalSaleLink = true) =>
+    Promise.all([
+      prisma.vente.count({ where }),
+      prisma.vente.findMany({
+        where,
+        select: buildSalesSelect(includeOriginalSaleLink),
+        orderBy: {
+          dateVente: "desc",
         },
-        caisse: {
-          select: {
-            id: true,
-            nom: true,
-          },
-        },
-        utilisateur: {
-          select: {
-            id: true,
-            nom: true,
-          },
-        },
-        client: {
-          select: {
-            id: true,
-            numeroClient: true,
-            nom: true,
-            credit: true,
-            compte: {
-              select: {
-                id: true,
-                nom: true,
-              },
-            },
-          },
-        },
-        sessionCaisse: {
-          select: {
-            id: true,
-            numeroSession: true,
-            statut: true,
-            dateOuverture: true,
-            dateFermeture: true,
-          },
-        },
-        lignes: {
-          orderBy: {
-            id: "asc",
-          },
-          select: {
-            produitId: true,
-            varianteId: true,
-            quantite: true,
-            prixUnitaire: true,
-            sousTotal: true,
-            produit: {
-              select: {
-                id: true,
-                nom: true,
-                prixAchat: true,
-              },
-            },
-      variante: {
-        select: {
-          id: true,
-          taille: true,
-          couleur: true,
-          valeursVariante: true,
-          prixAchat: true,
-        },
-      },
-          },
-        },
-        retours: {
-          select: {
-            id: true,
-            produitId: true,
-            varianteId: true,
-            quantite: true,
-            raison: true,
-            createdAt: true,
-          },
-        },
-      },
-      orderBy: {
-        dateVente: "desc",
-      },
-      skip,
-      take: limit,
-    }),
-  ]);
+        skip,
+        take: limit,
+      }),
+    ]);
+
+  let total;
+  let sales;
+
+  try {
+    [total, sales] = await fetchSalesPage(true);
+  } catch (error) {
+    if (!isPrismaMissingColumnError(error)) {
+      throw error;
+    }
+
+    logPrismaCompatFallback("apiController.getSales", error, {
+      action: "Retrying without original sale link fields.",
+    });
+    [total, sales] = await fetchSalesPage(false);
+  }
 
   return res.status(200).json(
     buildPaginatedResponse({
@@ -3721,6 +3756,14 @@ const getSales = async (req, res) => {
           customerName:
             sale.client?.compte?.nom || sale.client?.nom || "Client inconnu",
           customerCredit: sale.client ? decimalToNumber(sale.client.credit) : 0,
+          originalSaleId: sale.originalSaleId || sale.originalSale?.id || null,
+          originalSale: sale.originalSale
+            ? {
+                id: sale.originalSale.id,
+                ticketNumber: sale.originalSale.numeroTicket,
+                date: sale.originalSale.dateVente,
+              }
+            : null,
           sessionId: sale.sessionCaisseId,
           sessionNumber: sale.sessionCaisse?.numeroSession || null,
           sessionStatus: sale.sessionCaisse?.statut || null,
@@ -3973,7 +4016,8 @@ const createRefund = async (req, res) => {
     throw createHttpError(400, "No default cash register found for the refund.");
   }
 
-  const refundResult = await prisma.$transaction(async (tx) => {
+  const runRefundTransaction = (includeOriginalSaleLink = true) =>
+    prisma.$transaction(async (tx) => {
     let linkedSale = null;
     let soldQuantities = new Map();
     let returnedQuantities = new Map();
@@ -4327,6 +4371,9 @@ const createRefund = async (req, res) => {
         caisseId: fallbackCashRegisterId,
         utilisateurId: userId,
         clientId: customerId,
+        ...(includeOriginalSaleLink
+          ? { originalSaleId: linkedSale?.id || null }
+          : {}),
         sessionCaisseId: sessionCaisse.id,
         lignes: {
           create: lignesData,
@@ -4342,6 +4389,7 @@ const createRefund = async (req, res) => {
         paymentStatus: true,
         status: true,
         createdAt: true,
+        ...(includeOriginalSaleLink ? { originalSaleId: true } : {}),
       },
     });
 
@@ -4393,6 +4441,7 @@ const createRefund = async (req, res) => {
         paymentStatus: refundSale.paymentStatus,
         status: refundSale.status,
         createdAt: refundSale.createdAt,
+        originalSaleId: refundSale.originalSaleId || linkedSale?.id || null,
       },
       refunds: createdRefunds,
       originalSale: linkedSale
@@ -4403,6 +4452,21 @@ const createRefund = async (req, res) => {
         : null,
     };
   });
+
+  let refundResult;
+
+  try {
+    refundResult = await runRefundTransaction(true);
+  } catch (error) {
+    if (!isPrismaMissingColumnError(error)) {
+      throw error;
+    }
+
+    logPrismaCompatFallback("apiController.createRefund", error, {
+      action: "Retrying refund creation without original sale link column.",
+    });
+    refundResult = await runRefundTransaction(false);
+  }
 
   return res.status(201).json({
     success: true,
@@ -4973,42 +5037,67 @@ const getReports = async (req, res) => {
     throw createHttpError(400, "period must be one of: day, week, month.");
   }
 
-  const sales = await prisma.vente.findMany({
-    where: {
-      organisationId,
-      dateVente: {
-        gte: range.startDate,
-        lte: range.endDate,
-      },
-    },
-    include: {
-      pointDeVente: {
-        select: {
-          id: true,
-          nom: true,
+  const [sales, expenses] = await Promise.all([
+    prisma.vente.findMany({
+      where: {
+        organisationId,
+        dateVente: {
+          gte: range.startDate,
+          lte: range.endDate,
         },
       },
-      lignes: {
-        include: {
-          produit: {
-            select: {
-              id: true,
-              nom: true,
-              prixAchat: true,
+      include: {
+        pointDeVente: {
+          select: {
+            id: true,
+            nom: true,
+          },
+        },
+        lignes: {
+          include: {
+            produit: {
+              select: {
+                id: true,
+                nom: true,
+                prixAchat: true,
+              },
             },
           },
         },
       },
-    },
-    orderBy: {
-      dateVente: "desc",
-    },
-  });
+      orderBy: {
+        dateVente: "desc",
+      },
+    }),
+    prisma.charge.findMany({
+      where: {
+        organisationId,
+        dateCharge: {
+          gte: range.startDate,
+          lte: range.endDate,
+        },
+      },
+      include: {
+        pointDeVente: {
+          select: {
+            id: true,
+            nom: true,
+          },
+        },
+      },
+      orderBy: {
+        dateCharge: "desc",
+      },
+    }),
+  ]);
 
   let revenue = new Prisma.Decimal(0);
   let netProfit = new Prisma.Decimal(0);
+  let expensesTotal = new Prisma.Decimal(0);
   const salesByStoreMap = new Map();
   const topProductsMap = new Map();
+  const expensesByCategoryMap = new Map();
+  const expensesByStoreMap = new Map();
 
   for (const sale of sales) {
     revenue = revenue.plus(sale.total);
@@ -5018,6 +5107,7 @@ const getReports = async (req, res) => {
       storeName: sale.pointDeVente ? sale.pointDeVente.nom : "",
       revenue: new Prisma.Decimal(0),
       netProfit: new Prisma.Decimal(0),
+      expenses: new Prisma.Decimal(0),
       salesCount: 0,
     };
 
@@ -5044,11 +5134,47 @@ const getReports = async (req, res) => {
     }
   }
 
+  for (const expense of expenses) {
+    expensesTotal = expensesTotal.plus(expense.montant);
+    netProfit = netProfit.minus(expense.montant);
+
+    const storeKey = expense.pointDeVente ? expense.pointDeVente.id : 0;
+    const existingStore = salesByStoreMap.get(storeKey) || {
+      storeName: expense.pointDeVente ? expense.pointDeVente.nom : "",
+      revenue: new Prisma.Decimal(0),
+      netProfit: new Prisma.Decimal(0),
+      expenses: new Prisma.Decimal(0),
+      salesCount: 0,
+    };
+    const existingExpenseStore = expensesByStoreMap.get(storeKey) || {
+      storeName: expense.pointDeVente ? expense.pointDeVente.nom : "",
+      totalExpenses: new Prisma.Decimal(0),
+      expensesCount: 0,
+    };
+    const existingCategoryTotal =
+      expensesByCategoryMap.get(expense.categorie) || new Prisma.Decimal(0);
+
+    existingStore.expenses = existingStore.expenses.plus(expense.montant);
+    existingStore.netProfit = existingStore.netProfit.minus(expense.montant);
+    salesByStoreMap.set(storeKey, existingStore);
+
+    existingExpenseStore.totalExpenses =
+      existingExpenseStore.totalExpenses.plus(expense.montant);
+    existingExpenseStore.expensesCount += 1;
+    expensesByStoreMap.set(storeKey, existingExpenseStore);
+
+    expensesByCategoryMap.set(
+      expense.categorie,
+      existingCategoryTotal.plus(expense.montant)
+    );
+  }
+
   const salesByStore = Array.from(salesByStoreMap.values())
     .map((store) => ({
       storeName: store.storeName,
       revenue: decimalToNumber(store.revenue),
       netProfit: decimalToNumber(store.netProfit),
+      expenses: decimalToNumber(store.expenses),
       salesCount: store.salesCount,
     }))
     .sort((a, b) => b.revenue - a.revenue);
@@ -5063,15 +5189,33 @@ const getReports = async (req, res) => {
     .sort((a, b) => b.quantitySold - a.quantitySold)
     .slice(0, 10);
 
+  const expensesByCategory = Array.from(expensesByCategoryMap.entries())
+    .map(([category, total]) => ({
+      category,
+      total: decimalToNumber(total),
+    }))
+    .sort((left, right) => right.total - left.total);
+
+  const expensesByStore = Array.from(expensesByStoreMap.values())
+    .map((store) => ({
+      storeName: store.storeName,
+      totalExpenses: decimalToNumber(store.totalExpenses),
+      expensesCount: store.expensesCount,
+    }))
+    .sort((left, right) => right.totalExpenses - left.totalExpenses);
+
   return res.status(200).json({
     revenue: decimalToNumber(revenue),
     netProfit: decimalToNumber(netProfit),
+    expensesTotal: decimalToNumber(expensesTotal),
     salesCount: sales.length,
     averageBasket:
       sales.length > 0 ? decimalToNumber(revenue.div(sales.length)) : 0,
     bestStore: salesByStore.length > 0 ? salesByStore[0].storeName : "",
     salesByStore,
     topProducts,
+    expensesByCategory,
+    expensesByStore,
   });
 };
 
@@ -5085,7 +5229,9 @@ const getAnalytics = async (req, res) => {
     throw createHttpError(400, "period must be one of: week, month.");
   }
 
-  const [organisation, stores, sales, slowMovingProducts] = await Promise.all([
+  const currentMonthRange = getDateRange("month");
+  const [organisation, stores, sales, slowMovingProducts, periodExpenses, currentMonthExpenses] =
+    await Promise.all([
     prisma.organisation.findUnique({
       where: {
         id: organisationId,
@@ -5153,6 +5299,32 @@ const getAnalytics = async (req, res) => {
     buildSlowMovingProducts({
       organisationId,
       pointDeVenteId: primaryStore?.id || null,
+    }),
+    prisma.charge.aggregate({
+      where: {
+        organisationId,
+        ...(primaryStore?.id ? { pointDeVenteId: primaryStore.id } : {}),
+        dateCharge: {
+          gte: range.startDate,
+          lte: range.endDate,
+        },
+      },
+      _sum: {
+        montant: true,
+      },
+    }),
+    prisma.charge.aggregate({
+      where: {
+        organisationId,
+        ...(primaryStore?.id ? { pointDeVenteId: primaryStore.id } : {}),
+        dateCharge: {
+          gte: currentMonthRange.startDate,
+          lte: currentMonthRange.endDate,
+        },
+      },
+      _sum: {
+        montant: true,
+      },
     }),
   ]);
 
@@ -5276,6 +5448,8 @@ const getAnalytics = async (req, res) => {
       req.user?.organisationName || organisation?.name || null,
     hasSales,
     revenue: decimalToNumber(totalRevenue),
+    expensesTotal: decimalToNumber(periodExpenses._sum.montant || 0),
+    currentMonthExpenses: decimalToNumber(currentMonthExpenses._sum.montant || 0),
     salesCount: sales.length,
     averageBasket:
       sales.length > 0 ? decimalToNumber(totalRevenue.div(sales.length)) : 0,

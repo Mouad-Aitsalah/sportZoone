@@ -172,11 +172,32 @@ const purchaseInclude = {
           codeBarres: true,
         },
       },
+      variante: {
+        select: {
+          id: true,
+          taille: true,
+          couleur: true,
+          valeursVariante: true,
+          codeBarres: true,
+        },
+      },
     },
     orderBy: {
       id: "asc",
     },
   },
+};
+
+const buildPurchaseVariantLabel = (variant) => {
+  const valuesText = String(variant?.valeursVariante || "").trim();
+
+  if (valuesText) {
+    return valuesText;
+  }
+
+  const size = String(variant?.taille || "").trim();
+  const color = String(variant?.couleur || "").trim();
+  return [size, color].filter(Boolean).join(" / ");
 };
 
 const toApiPurchaseLine = (ligne) => ({
@@ -187,6 +208,9 @@ const toApiPurchaseLine = (ligne) => ({
   variantId: ligne.varianteId ?? null,
   produitNom: ligne.produit?.nom || null,
   productName: ligne.produit?.nom || null,
+  varianteNom: buildPurchaseVariantLabel(ligne.variante),
+  variantLabel: buildPurchaseVariantLabel(ligne.variante),
+  barcode: ligne.variante?.codeBarres || ligne.produit?.codeBarres || "",
   quantite: ligne.quantite,
   quantity: ligne.quantite,
   prixAchatUnitaireHT: decimalToNumber(ligne.prixAchatUnitaireHT),
@@ -707,6 +731,7 @@ const createOrUpdatePurchase = async ({
             create: normalizedLines.map((ligne) => ({
               organisationId: ligne.organisationId,
               produitId: ligne.produitId,
+              varianteId: ligne.varianteId,
               quantite: ligne.quantite,
               prixAchatUnitaireHT: ligne.prixAchatUnitaireHT,
               tauxTVA: ligne.tauxTVA,
@@ -744,6 +769,7 @@ const createOrUpdatePurchase = async ({
             create: normalizedLines.map((ligne) => ({
               organisationId: ligne.organisationId,
               produitId: ligne.produitId,
+              varianteId: ligne.varianteId,
               quantite: ligne.quantite,
               prixAchatUnitaireHT: ligne.prixAchatUnitaireHT,
               tauxTVA: ligne.tauxTVA,
