@@ -20,14 +20,42 @@ const { ensureSuperAdmin } = require("./src/bootstrap/ensureSuperAdmin");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const DEFAULT_ALLOWED_ORIGINS = [
+  "http://localhost:3000",
+  "http://localhost:3001",
+  "https://sportzone-ten.vercel.app",
+];
+const allowedOrigins = new Set([
+  ...DEFAULT_ALLOWED_ORIGINS,
+  ...String(process.env.CORS_ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean),
+]);
+const allowedOriginPatterns = [/^https:\/\/.*\.vercel\.app$/i];
+
+const isAllowedCorsOrigin = (origin) => {
+  if (!origin) {
+    return true;
+  }
+
+  if (allowedOrigins.has(origin)) {
+    return true;
+  }
+
+  return allowedOriginPatterns.some((pattern) => pattern.test(origin));
+};
 
 app.use(
   cors({
-    origin: [
-      "http://localhost:3000",
-      "http://localhost:3001",
-      "https://sportzone-ten.vercel.app",
-    ],
+    origin(origin, callback) {
+      if (isAllowedCorsOrigin(origin)) {
+        return callback(null, true);
+      }
+
+      console.warn("CORS blocked origin:", origin);
+      return callback(new Error("Origin not allowed by CORS."));
+    },
     credentials: true,
   })
 );
@@ -62,7 +90,7 @@ async function startServer() {
     app.listen(PORT, () => {
       console.log(`Server is running on port ${PORT}`);
       console.log(
-        `Super admin ready: ${bootstrapResult.superAdmin.email} (${bootstrapResult.superAdmin.role})`
+        `Super admin ${bootstrapResult.action}: ${bootstrapResult.superAdmin.email} (${bootstrapResult.superAdmin.role})`
       );
       startDailyReportJob();
     });
@@ -73,7 +101,6 @@ async function startServer() {
 }
 
 startServer();
-
 
 
 

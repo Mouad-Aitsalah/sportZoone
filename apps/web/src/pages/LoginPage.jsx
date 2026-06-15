@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import sportZoneLogo from "../assets/sportzone-logo.jpeg";
-import api from "../services/api";
+import api, { API_BASE_URL } from "../services/api";
 import { ROUTE_PATHS } from "../routes/paths";
 import { getCurrentUser, isAuthenticated, saveAuthSession } from "../store/authStore";
 
@@ -62,14 +62,27 @@ function LoginPage() {
       const nextPath = resolveNextPath(authSession.user?.role, redirectPath);
       navigate(nextPath, { replace: true });
     } catch (error) {
-      const backendMessage = error.response?.data?.message;
+      const backendMessage =
+        error.response?.data?.message ||
+        (typeof error.response?.data === "string" ? error.response.data : "");
+      const statusCode = error.response?.status;
 
       if (backendMessage) {
         setErrorMessage(backendMessage);
       } else if (error.message === "INVALID_AUTH_RESPONSE") {
         setErrorMessage("La reponse du serveur apres connexion est invalide.");
+      } else if (!error.response) {
+        setErrorMessage(
+          `Impossible de joindre l'API de connexion (${API_BASE_URL}). Verifiez REACT_APP_API_URL et le CORS backend.`
+        );
+      } else if (statusCode === 404) {
+        setErrorMessage(
+          "La route de connexion est introuvable sur le backend. Verifiez que l'API expose bien /api/auth/login."
+        );
       } else {
-        setErrorMessage("Email ou mot de passe incorrect.");
+        setErrorMessage(
+          `Connexion impossible${statusCode ? ` (${statusCode})` : ""}.`
+        );
       }
     } finally {
       setIsLoading(false);

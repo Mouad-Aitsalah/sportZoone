@@ -9,8 +9,14 @@ const {
 } = require("../src/services/compteService");
 
 const prisma = new PrismaClient();
-const GLOBAL_ORGANISATION_NAME = "SportZone Global";
-const SUPER_ADMIN_EMAIL = "superadmin@sportzone.local";
+const GLOBAL_ORGANISATION_NAME =
+  process.env.SUPER_ADMIN_ORGANISATION_NAME || "SportZone Global";
+const SUPER_ADMIN_EMAIL = String(
+  process.env.SUPER_ADMIN_EMAIL || "superadmin@sportzone.local"
+)
+  .trim()
+  .toLowerCase();
+const SUPER_ADMIN_PASSWORD = process.env.SUPER_ADMIN_PASSWORD || "admin123456";
 
 const categories = [
   { code: "CREATINE", nom: "Creatine", nomComplet: "Creatine" },
@@ -600,7 +606,7 @@ async function main() {
   await resetCopiedProjectData();
 
   const [superAdminPassword, adminPassword, cashierPassword] = await Promise.all([
-    bcrypt.hash("SuperAdmin12345", 10),
+    bcrypt.hash(SUPER_ADMIN_PASSWORD, 10),
     bcrypt.hash("Admin12345", 10),
     bcrypt.hash("Caisse12345", 10),
   ]);
@@ -623,7 +629,7 @@ async function main() {
 
   console.log("SportZone multi-tenant seed completed.");
   console.log("Organisation globale:");
-  console.log(`  Super admin: ${SUPER_ADMIN_EMAIL} / SuperAdmin12345`);
+  console.log(`  Super admin: ${SUPER_ADMIN_EMAIL} / ${SUPER_ADMIN_PASSWORD}`);
   console.log("Organisation Rabat:");
   console.log("  Admin: admin-rabat@sportzone.local / Admin12345");
   console.log("  Caissier: caissier-rabat@sportzone.local / Caisse12345");

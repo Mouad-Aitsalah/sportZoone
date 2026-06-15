@@ -1,10 +1,15 @@
 const bcrypt = require("bcryptjs");
 const prisma = require("../config/prisma");
 
-const GLOBAL_ORGANISATION_NAME = "SportZone Global";
-const SUPER_ADMIN_EMAIL = "superadmin@sportzone.local";
-const SUPER_ADMIN_PASSWORD = "SuperAdmin12345";
-const SUPER_ADMIN_NAME = "Super Admin SportZone";
+const GLOBAL_ORGANISATION_NAME =
+  process.env.SUPER_ADMIN_ORGANISATION_NAME || "SportZone Global";
+const SUPER_ADMIN_EMAIL = String(
+  process.env.SUPER_ADMIN_EMAIL || "superadmin@sportzone.local"
+)
+  .trim()
+  .toLowerCase();
+const SUPER_ADMIN_PASSWORD = process.env.SUPER_ADMIN_PASSWORD || "admin123456";
+const SUPER_ADMIN_NAME = process.env.SUPER_ADMIN_NAME || "Super Admin SportZone";
 
 async function ensureGlobalOrganisation() {
   const existingOrganisation = await prisma.organisation.findFirst({
@@ -35,6 +40,14 @@ async function ensureGlobalOrganisation() {
 async function ensureSuperAdmin() {
   const organisation = await ensureGlobalOrganisation();
   const hashedPassword = await bcrypt.hash(SUPER_ADMIN_PASSWORD, 10);
+  const existingSuperAdmin = await prisma.utilisateur.findUnique({
+    where: {
+      email: SUPER_ADMIN_EMAIL,
+    },
+    select: {
+      id: true,
+    },
+  });
 
   const superAdmin = await prisma.utilisateur.upsert({
     where: {
@@ -73,6 +86,7 @@ async function ensureSuperAdmin() {
   return {
     organisation,
     superAdmin,
+    action: existingSuperAdmin ? "updated" : "created",
   };
 }
 

@@ -2,10 +2,31 @@ import axios from "axios";
 import { getAuthToken, logout } from "../store/authStore";
 
 const DEFAULT_API_BASE_URL = "http://localhost:5001/api";
-const API_BASE_URL = (process.env.REACT_APP_API_URL || DEFAULT_API_BASE_URL).replace(
-  /\/+$/,
-  ""
-);
+
+const normalizeApiBaseUrl = (value) => {
+  const normalizedValue = String(value || "")
+    .trim()
+    .replace(/\/+$/, "");
+
+  if (!normalizedValue) {
+    return DEFAULT_API_BASE_URL;
+  }
+
+  return /\/api$/i.test(normalizedValue)
+    ? normalizedValue
+    : `${normalizedValue}/api`;
+};
+
+const resolveApiBaseUrl = () => {
+  const runtimeUrl =
+    typeof window !== "undefined" ? window.__SPORTZONE_API_URL__ : "";
+  const configuredUrl =
+    runtimeUrl || process.env.REACT_APP_API_URL || process.env.VITE_API_URL;
+
+  return normalizeApiBaseUrl(configuredUrl || DEFAULT_API_BASE_URL);
+};
+
+export const API_BASE_URL = resolveApiBaseUrl();
 
 const api = axios.create({
   baseURL: API_BASE_URL,

@@ -112,6 +112,16 @@ const SALE_TOTAL_TOLERANCE = new Prisma.Decimal("0.01");
 const MAX_PAGINATION_LIMIT = 500;
 const createTimerLabel = (route) =>
   `[perf] ${route} ${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+const isAuthDebugEnabled =
+  String(process.env.AUTH_DEBUG_LOGS || "").trim().toLowerCase() === "true";
+
+const logAuthDebug = (step, payload = {}) => {
+  if (!isAuthDebugEnabled) {
+    return;
+  }
+
+  console.info(`[auth-login] ${step}`, payload);
+};
 
 const getPaginationParams = (query) => {
   const rawPage = query.page;
@@ -1636,7 +1646,16 @@ const login = async (req, res) => {
   });
   const email = validatedEmail.toLowerCase();
 
+  logAuthDebug("request_received", {
+    email,
+    origin: req.headers.origin || null,
+    userAgent: req.headers["user-agent"] || null,
+  });
+
   if (!process.env.JWT_SECRET) {
+    logAuthDebug("missing_jwt_secret", {
+      email,
+    });
     throw createHttpError(500, "JWT_SECRET is missing in the configuration.");
   }
 
@@ -1662,14 +1681,36 @@ const login = async (req, res) => {
   });
 
   if (!user) {
+    logAuthDebug("user_not_found", {
+      email,
+    });
     throw createHttpError(401, "Invalid email or password.", "INVALID_CREDENTIALS");
   }
 
+  logAuthDebug("user_found", {
+    email,
+    userId: user.id,
+    role: user.role,
+    estActif: user.estActif,
+    organisationId: user.organisationId,
+  });
+
   if (!user.estActif) {
+    logAuthDebug("user_disabled", {
+      email,
+      userId: user.id,
+    });
     throw createHttpError(403, "This account is disabled.", "ACCOUNT_DISABLED");
   }
 
   const isPasswordValid = await bcrypt.compare(password, user.motDePasse);
+
+  logAuthDebug("password_checked", {
+    email,
+    userId: user.id,
+    isPasswordValid,
+    role: user.role,
+  });
 
   if (!isPasswordValid) {
     throw createHttpError(401, "Invalid email or password.", "INVALID_CREDENTIALS");
@@ -1688,6 +1729,12 @@ const login = async (req, res) => {
       "FORBIDDEN"
     );
   }
+
+  logAuthDebug("login_success", {
+    email,
+    userId: user.id,
+    role: user.role,
+  });
 
   return res.status(200).json({
     token: createToken(user),
