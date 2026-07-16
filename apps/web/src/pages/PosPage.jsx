@@ -1884,14 +1884,18 @@ function PosPage() {
                         : "";
 
                     return (
-                      <div
+                      <button
                         className="hint-card pos-quick-product-card"
                         key={product.id}
+                        type="button"
                         title={
                           product.barcode
                             ? `Code-barres: ${product.barcode}`
                             : product.name
                         }
+                        onClick={() => handleQuickAdd(product)}
+                        disabled={!product.active || isSearchingBarcode}
+                        aria-label={`Ajouter ${product.name} au panier`}
                       >
                         <div className="pos-quick-product-head">
                           <h3 title={product.name}>{product.name}</h3>
@@ -1912,17 +1916,8 @@ function PosPage() {
                           >
                             {product.barcode || "Sans code-barres"}
                           </span>
-                          <button
-                            className="ghost-button small-button pos-quick-product-button"
-                            type="button"
-                            onClick={() => handleQuickAdd(product)}
-                            disabled={!product.active || isSearchingBarcode}
-                            aria-label={`Ajouter ${product.name}`}
-                          >
-                            +
-                          </button>
                         </div>
-                      </div>
+                      </button>
                     );
                   })
                 )}
