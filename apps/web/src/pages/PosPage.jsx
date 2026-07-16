@@ -151,6 +151,14 @@ const buildCartItemId = (productId, variantId) =>
 const getProductDisplayName = (productName, variantLabel = null) =>
   variantLabel ? `${productName} / ${variantLabel}` : productName;
 
+const normalizeSearchValue = (value) =>
+  String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+
 const POS_QUANTITY_STEP = 0.25;
 
 const roundPosQuantity = (value) => {
@@ -261,6 +269,7 @@ const buildCashSessionWithSale = (currentSession, nextSale, sessionMeta = {}) =>
 function PosPage() {
   const posPageShellRef = useRef(null);
   const [barcode, setBarcode] = useState("");
+  const [productSearchTerm, setProductSearchTerm] = useState("");
   const [products, setProducts] = useState([]);
   const [stores, setStores] = useState([]);
   const [cashRegisters, setCashRegisters] = useState([]);
@@ -414,6 +423,39 @@ function PosPage() {
   const selectableCustomers = filteredCustomers.length
     ? filteredCustomers
     : [selectedCustomer];
+  const normalizedProductSearchTerm = useMemo(
+    () => normalizeSearchValue(productSearchTerm),
+    [productSearchTerm]
+  );
+  const searchableProducts = useMemo(
+    () =>
+      products.map((product) => ({
+        product,
+        normalizedName: normalizeSearchValue(product?.name),
+      })),
+    [products]
+  );
+  const filteredProducts = useMemo(() => {
+    if (!normalizedProductSearchTerm) {
+      return products;
+    }
+
+    const startsWithMatches = [];
+    const containsMatches = [];
+
+    for (const entry of searchableProducts) {
+      const matchIndex = entry.normalizedName.indexOf(normalizedProductSearchTerm);
+
+      if (matchIndex === 0) {
+        startsWithMatches.push(entry.product);
+      } else if (matchIndex > 0) {
+        containsMatches.push(entry.product);
+      }
+    }
+
+    return [...startsWithMatches, ...containsMatches];
+  }, [normalizedProductSearchTerm, products, searchableProducts]);
+  const isProductSearchActive = Boolean(normalizedProductSearchTerm);
 
   const setCachedCurrentCashSession = useCallback(
     (nextValueOrUpdater) => {
@@ -1800,13 +1842,39 @@ function PosPage() {
                 </button>
               </form>
 
+              <div className="field-group">
+                <label className="field-label" htmlFor="product-search">
+                  Recherche produit
+                </label>
+                <input
+                  id="product-search"
+                  className="text-input"
+                  type="search"
+                  placeholder="Rechercher instantanement par nom..."
+                  value={productSearchTerm}
+                  onChange={(event) => setProductSearchTerm(event.target.value)}
+                  autoComplete="off"
+                />
+                <p className="table-subtext">
+                  {isProductSearchActive
+                    ? `${filteredProducts.length} produit${
+                        filteredProducts.length > 1 ? "s" : ""
+                      } trouve${filteredProducts.length > 1 ? "s" : ""}.`
+                    : `${products.length} produits disponibles.`}
+                </p>
+              </div>
+
               <div className="product-hint-list pos-quick-product-grid">
                 {isLoadingProducts ? (
                   <div className="empty-state">
                     Chargement des produits rapides...
                   </div>
+                ) : !filteredProducts.length ? (
+                  <div className="empty-state">
+                    Aucun produit ne correspond a cette recherche.
+                  </div>
                 ) : (
-                  products.map((product) => {
+                  filteredProducts.map((product) => {
                     const activeVariants = getActiveVariants(product);
                     const hasSingleVariant = activeVariants.length === 1;
                     const shortVariantLabel = hasSingleVariant
