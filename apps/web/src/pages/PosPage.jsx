@@ -17,7 +17,7 @@ import {
   writeCache,
 } from "../utils/appCache";
 import { cleanupLegacyStoreCache } from "../utils/storeAccess";
-import { formatCurrencyDh } from "../utils/formatters";
+import { formatCurrencyDh, formatDateTime } from "../utils/formatters";
 
 const DEFAULT_CUSTOMER = {
   id: null,
@@ -159,6 +159,182 @@ const normalizeSearchValue = (value) =>
     .replace(/\s+/g, " ")
     .trim();
 
+const PRODUCT_INFO_FALLBACK = "Non renseigne";
+
+const resolveProductTextValue = (...values) => {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return String(value);
+    }
+  }
+
+  return "";
+};
+
+const resolveProductNumberValue = (...values) => {
+  for (const value of values) {
+    if (value === "" || value === null || value === undefined) {
+      continue;
+    }
+
+    const numericValue = Number(value);
+
+    if (Number.isFinite(numericValue)) {
+      return numericValue;
+    }
+  }
+
+  return null;
+};
+
+const getProductBarcodeValue = (product) =>
+  resolveProductTextValue(product?.barcode, product?.codeBarres);
+
+const getProductReferenceValue = (product) =>
+  resolveProductTextValue(
+    product?.reference,
+    product?.sku,
+    product?.ref,
+    product?.internalReference,
+    product?.referenceInterne,
+    product?.code
+  );
+
+const getProductCategoryValue = (product) =>
+  resolveProductTextValue(product?.categoryFullName, product?.category, product?.categorie);
+
+const getProductBrandValue = (product) =>
+  resolveProductTextValue(product?.brand, product?.marque);
+
+const getProductSupplierValue = (product) =>
+  resolveProductTextValue(
+    product?.supplierName,
+    product?.fournisseurNom,
+    product?.supplier?.name,
+    product?.fournisseur?.nom
+  );
+
+const getProductDescriptionValue = (product) =>
+  resolveProductTextValue(
+    product?.description,
+    product?.descriptionLong,
+    product?.descriptionCourte,
+    product?.notes
+  );
+
+const getProductLocationValue = (product) =>
+  resolveProductTextValue(
+    product?.location,
+    product?.emplacement,
+    product?.shelfLocation,
+    product?.rayon
+  );
+
+const getProductPurchasePriceValue = (product) =>
+  resolveProductNumberValue(product?.purchasePrice, product?.prixAchat);
+
+const getProductSalePriceValue = (product) =>
+  resolveProductNumberValue(
+    product?.salePrice,
+    product?.prixVente,
+    product?.retailPrice,
+    product?.prixDetail,
+    product?.price
+  );
+
+const getProductAvailableStockValue = (product) =>
+  resolveProductNumberValue(product?.stock, product?.quantity, product?.quantiteStock);
+
+const getProductReservedStockValue = (product) =>
+  resolveProductNumberValue(
+    product?.reservedStock,
+    product?.stockReserved,
+    product?.reservedQuantity,
+    product?.quantiteReservee
+  );
+
+const getProductMinimumStockValue = (product) =>
+  resolveProductNumberValue(
+    product?.minimumThreshold,
+    product?.minimumStock,
+    product?.stockMinimum,
+    product?.seuilMinimum
+  );
+
+const getProductActiveVariantsForInfo = (product) => {
+  const variantsSource = Array.isArray(product?.variants)
+    ? product.variants
+    : Array.isArray(product?.variantes)
+      ? product.variantes
+      : Array.isArray(product?.productVariants)
+        ? product.productVariants
+        : [];
+
+  return variantsSource.filter((variant) => (variant?.active ?? variant?.actif ?? true) !== false);
+};
+
+const formatInfoTextValue = (value) => {
+  if (value === 0) {
+    return "0";
+  }
+
+  if (!value) {
+    return PRODUCT_INFO_FALLBACK;
+  }
+
+  return String(value);
+};
+
+const formatInfoCurrencyValue = (value) =>
+  value === null ? PRODUCT_INFO_FALLBACK : formatCurrencyDh(value);
+
+const formatInfoDateValue = (value) => {
+  if (!value) {
+    return PRODUCT_INFO_FALLBACK;
+  }
+
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? PRODUCT_INFO_FALLBACK : formatDateTime(value);
+};
+
+const extractProductDetailsPayload = (payload) => {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  if (payload.data && typeof payload.data === "object" && !Array.isArray(payload.data)) {
+    if (payload.data.product && typeof payload.data.product === "object") {
+      return payload.data.product;
+    }
+
+    return payload.data;
+  }
+
+  if (payload.product && typeof payload.product === "object") {
+    return payload.product;
+  }
+
+  return payload;
+};
+
+const hasExtendedProductDetails = (product) =>
+  Boolean(
+    getProductReferenceValue(product) ||
+      getProductBrandValue(product) ||
+      getProductSupplierValue(product) ||
+      getProductDescriptionValue(product) ||
+      getProductLocationValue(product) ||
+      product?.createdAt ||
+      product?.updatedAt ||
+      getProductReservedStockValue(product) !== null ||
+      getProductMinimumStockValue(product) !== null ||
+      getProductPurchasePriceValue(product) !== null
+  );
+
 const POS_QUANTITY_STEP = 0.25;
 
 const roundPosQuantity = (value) => {
@@ -297,6 +473,13 @@ function PosPage() {
     product: null,
     variants: [],
   });
+  const [productInfoModal, setProductInfoModal] = useState({
+    isOpen: false,
+    product: null,
+  });
+  const [productDetailsById, setProductDetailsById] = useState({});
+  const [isLoadingProductInfo, setIsLoadingProductInfo] = useState(false);
+  const [productInfoError, setProductInfoError] = useState("");
   const [isCustomerModalOpen, setIsCustomerModalOpen] = useState(false);
   const [isSubmittingCustomer, setIsSubmittingCustomer] = useState(false);
   const [customerModalError, setCustomerModalError] = useState("");
@@ -456,6 +639,53 @@ function PosPage() {
     return [...startsWithMatches, ...containsMatches];
   }, [normalizedProductSearchTerm, products, searchableProducts]);
   const isProductSearchActive = Boolean(normalizedProductSearchTerm);
+  const selectedProductInfo = useMemo(() => {
+    if (!productInfoModal.product?.id) {
+      return productInfoModal.product;
+    }
+
+    const liveProduct =
+      products.find((product) => product.id === productInfoModal.product.id) ||
+      productInfoModal.product;
+    const cachedDetails = productDetailsById[productInfoModal.product.id];
+
+    return cachedDetails ? { ...liveProduct, ...cachedDetails } : liveProduct;
+  }, [productDetailsById, productInfoModal.product, products]);
+  const selectedProductInfoSummary = useMemo(() => {
+    if (!selectedProductInfo) {
+      return null;
+    }
+
+    const purchasePrice = getProductPurchasePriceValue(selectedProductInfo);
+    const salePrice = getProductSalePriceValue(selectedProductInfo);
+    const marginValue =
+      purchasePrice !== null && salePrice !== null ? salePrice - purchasePrice : null;
+    const marginRate =
+      purchasePrice !== null && purchasePrice > 0 && marginValue !== null
+        ? (marginValue / purchasePrice) * 100
+        : null;
+
+    return {
+      name: selectedProductInfo.name || "Produit",
+      reference: getProductReferenceValue(selectedProductInfo),
+      barcode: getProductBarcodeValue(selectedProductInfo),
+      category: getProductCategoryValue(selectedProductInfo),
+      brand: getProductBrandValue(selectedProductInfo),
+      supplier: getProductSupplierValue(selectedProductInfo),
+      description: getProductDescriptionValue(selectedProductInfo),
+      purchasePrice,
+      salePrice,
+      marginValue,
+      marginRate,
+      availableStock: getProductAvailableStockValue(selectedProductInfo),
+      reservedStock: getProductReservedStockValue(selectedProductInfo),
+      minimumStock: getProductMinimumStockValue(selectedProductInfo),
+      location: getProductLocationValue(selectedProductInfo),
+      variants: getProductActiveVariantsForInfo(selectedProductInfo),
+      createdAt: selectedProductInfo.createdAt,
+      updatedAt: selectedProductInfo.updatedAt,
+    };
+  }, [selectedProductInfo]);
 
   const setCachedCurrentCashSession = useCallback(
     (nextValueOrUpdater) => {
@@ -1063,6 +1293,77 @@ function PosPage() {
       product: null,
       variants: [],
     });
+  };
+
+  const closeProductInfoModal = () => {
+    setProductInfoModal({
+      isOpen: false,
+      product: null,
+    });
+    setProductInfoError("");
+    setIsLoadingProductInfo(false);
+  };
+
+  const openProductInfoModal = useCallback(
+    async (product) => {
+      if (!product) {
+        return;
+      }
+
+      setProductInfoModal({
+        isOpen: true,
+        product,
+      });
+      setProductInfoError("");
+
+      if (hasExtendedProductDetails(product)) {
+        setProductDetailsById((current) =>
+          current[product.id] ? current : { ...current, [product.id]: product }
+        );
+      }
+
+      if (!product.id || productDetailsById[product.id] || hasExtendedProductDetails(product)) {
+        return;
+      }
+
+      try {
+        setIsLoadingProductInfo(true);
+        const response = await api.get(`/products/${product.id}`);
+        const productDetails = extractProductDetailsPayload(response.data);
+
+        if (productDetails && typeof productDetails === "object") {
+          setProductDetailsById((current) => ({
+            ...current,
+            [product.id]: {
+              ...product,
+              ...productDetails,
+            },
+          }));
+        }
+      } catch (error) {
+        setProductInfoError(
+          error.response?.data?.message ||
+            "Impossible de charger les informations detaillees de ce produit."
+        );
+      } finally {
+        setIsLoadingProductInfo(false);
+      }
+    },
+    [productDetailsById]
+  );
+
+  const handleProductCardKeyDown = (event, product, canQuickAddProduct) => {
+    if (event.key !== "Enter" && event.key !== " ") {
+      return;
+    }
+
+    event.preventDefault();
+
+    if (!canQuickAddProduct) {
+      return;
+    }
+
+    handleQuickAdd(product);
   };
 
   const buildVariantCartItem = (product, variant) => {
@@ -1877,6 +2178,7 @@ function PosPage() {
                   filteredProducts.map((product) => {
                     const activeVariants = getActiveVariants(product);
                     const hasSingleVariant = activeVariants.length === 1;
+                    const canQuickAddProduct = product.active && !isSearchingBarcode;
                     const shortVariantLabel = hasSingleVariant
                       ? String(activeVariants[0]?.label || "-").slice(0, 36)
                       : activeVariants.length > 1
@@ -1884,17 +2186,27 @@ function PosPage() {
                         : "";
 
                     return (
-                      <button
-                        className="hint-card pos-quick-product-card"
+                      <div
+                        className={`hint-card pos-quick-product-card ${
+                          canQuickAddProduct ? "" : "is-disabled"
+                        }`.trim()}
                         key={product.id}
-                        type="button"
+                        role="button"
+                        tabIndex={canQuickAddProduct ? 0 : -1}
                         title={
                           product.barcode
                             ? `Code-barres: ${product.barcode}`
                             : product.name
                         }
-                        onClick={() => handleQuickAdd(product)}
-                        disabled={!product.active || isSearchingBarcode}
+                        onClick={() => {
+                          if (canQuickAddProduct) {
+                            handleQuickAdd(product);
+                          }
+                        }}
+                        onKeyDown={(event) =>
+                          handleProductCardKeyDown(event, product, canQuickAddProduct)
+                        }
+                        aria-disabled={!canQuickAddProduct}
                         aria-label={`Ajouter ${product.name} au panier`}
                       >
                         <div className="pos-quick-product-head">
@@ -1910,6 +2222,25 @@ function PosPage() {
                           </p>
                         ) : null}
                         <div className="pos-quick-product-footer">
+                          <button
+                            className="ghost-button small-button pos-quick-product-info-button"
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              openProductInfoModal(product);
+                            }}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter" || event.key === " ") {
+                                event.stopPropagation();
+                              }
+                            }}
+                            aria-label={`Voir les informations de ${product.name}`}
+                          >
+                            <span className="pos-quick-product-info-icon" aria-hidden="true">
+                              i
+                            </span>
+                            <span>Infos</span>
+                          </button>
                           <span
                             className="pos-quick-product-barcode"
                             title={product.barcode || "Sans code-barres"}
@@ -1917,7 +2248,7 @@ function PosPage() {
                             {product.barcode || "Sans code-barres"}
                           </span>
                         </div>
-                      </button>
+                      </div>
                     );
                   })
                 )}
@@ -2216,6 +2547,186 @@ function PosPage() {
           </div>
         </div>
       </SectionCard>
+
+      <Modal
+        isOpen={productInfoModal.isOpen}
+        eyebrow="Informations du produit"
+        title={selectedProductInfoSummary?.name || "Produit"}
+        description="Consultez la fiche detaillee sans ajouter le produit au panier."
+        onClose={closeProductInfoModal}
+        cardClassName="modal-large pos-product-info-modal"
+        bodyClassName="pos-product-info-modal-body"
+        actions={
+          <button className="ghost-button" type="button" onClick={closeProductInfoModal}>
+            Fermer
+          </button>
+        }
+      >
+        {selectedProductInfoSummary ? (
+          <div className="pos-product-info-layout">
+            <div className="pos-product-info-hero">
+              <div className="pos-product-info-hero-copy">
+                <p className="pos-product-info-overline">Informations du produit</p>
+                <h3 className="pos-product-info-name">{selectedProductInfoSummary.name}</h3>
+                <p className="pos-product-info-subtitle">
+                  {formatInfoTextValue(selectedProductInfoSummary.category)}
+                </p>
+              </div>
+              <div className="pos-product-info-price-badge">
+                <span>Prix de vente</span>
+                <strong>{formatInfoCurrencyValue(selectedProductInfoSummary.salePrice)}</strong>
+              </div>
+            </div>
+
+            {productInfoError ? (
+              <div className="inline-notice warning">{productInfoError}</div>
+            ) : null}
+
+            {isLoadingProductInfo ? (
+              <div className="inline-notice info">
+                Chargement des informations detaillees du produit...
+              </div>
+            ) : null}
+
+            <div className="pos-product-info-sections">
+              <section className="pos-product-info-section">
+                <div className="pos-product-info-section-head">
+                  <h4>Informations generales</h4>
+                </div>
+                <div className="pos-product-info-fields">
+                  <div className="pos-product-info-field">
+                    <span>Reference</span>
+                    <strong>{formatInfoTextValue(selectedProductInfoSummary.reference)}</strong>
+                  </div>
+                  <div className="pos-product-info-field">
+                    <span>Code-barres</span>
+                    <strong>{formatInfoTextValue(selectedProductInfoSummary.barcode)}</strong>
+                  </div>
+                  <div className="pos-product-info-field">
+                    <span>Categorie</span>
+                    <strong>{formatInfoTextValue(selectedProductInfoSummary.category)}</strong>
+                  </div>
+                  <div className="pos-product-info-field">
+                    <span>Marque</span>
+                    <strong>{formatInfoTextValue(selectedProductInfoSummary.brand)}</strong>
+                  </div>
+                  <div className="pos-product-info-field">
+                    <span>Fournisseur</span>
+                    <strong>{formatInfoTextValue(selectedProductInfoSummary.supplier)}</strong>
+                  </div>
+                  <div className="pos-product-info-field pos-product-info-field-wide">
+                    <span>Description</span>
+                    <strong>{formatInfoTextValue(selectedProductInfoSummary.description)}</strong>
+                  </div>
+                </div>
+              </section>
+
+              <section className="pos-product-info-section">
+                <div className="pos-product-info-section-head">
+                  <h4>Prix</h4>
+                </div>
+                <div className="pos-product-info-fields">
+                  <div className="pos-product-info-field">
+                    <span>Prix d'achat</span>
+                    <strong>{formatInfoCurrencyValue(selectedProductInfoSummary.purchasePrice)}</strong>
+                  </div>
+                  <div className="pos-product-info-field">
+                    <span>Prix de vente</span>
+                    <strong>{formatInfoCurrencyValue(selectedProductInfoSummary.salePrice)}</strong>
+                  </div>
+                  <div className="pos-product-info-field">
+                    <span>Marge en DH</span>
+                    <strong>{formatInfoCurrencyValue(selectedProductInfoSummary.marginValue)}</strong>
+                  </div>
+                  <div className="pos-product-info-field">
+                    <span>Marge en %</span>
+                    <strong>
+                      {selectedProductInfoSummary.marginRate === null
+                        ? PRODUCT_INFO_FALLBACK
+                        : `${selectedProductInfoSummary.marginRate.toFixed(2)} %`}
+                    </strong>
+                  </div>
+                </div>
+              </section>
+
+              <section className="pos-product-info-section">
+                <div className="pos-product-info-section-head">
+                  <h4>Stock</h4>
+                </div>
+                <div className="pos-product-info-fields">
+                  <div className="pos-product-info-field">
+                    <span>Stock disponible</span>
+                    <strong>{formatInfoTextValue(selectedProductInfoSummary.availableStock)}</strong>
+                  </div>
+                  <div className="pos-product-info-field">
+                    <span>Stock reserve</span>
+                    <strong>{formatInfoTextValue(selectedProductInfoSummary.reservedStock)}</strong>
+                  </div>
+                  <div className="pos-product-info-field">
+                    <span>Stock minimum</span>
+                    <strong>{formatInfoTextValue(selectedProductInfoSummary.minimumStock)}</strong>
+                  </div>
+                  <div className="pos-product-info-field">
+                    <span>Emplacement</span>
+                    <strong>{formatInfoTextValue(selectedProductInfoSummary.location)}</strong>
+                  </div>
+                </div>
+              </section>
+
+              <section className="pos-product-info-section">
+                <div className="pos-product-info-section-head">
+                  <h4>Variantes</h4>
+                </div>
+                {selectedProductInfoSummary.variants.length ? (
+                  <div className="pos-product-info-variants">
+                    {selectedProductInfoSummary.variants.map((variant, index) => (
+                      <div
+                        className="pos-product-info-variant-card"
+                        key={variant.id || `${selectedProductInfoSummary.name}-${index}`}
+                      >
+                        <div className="pos-product-info-field">
+                          <span>Taille</span>
+                          <strong>
+                            {formatInfoTextValue(
+                              resolveProductTextValue(variant?.size, variant?.taille, "Unique")
+                            )}
+                          </strong>
+                        </div>
+                        <div className="pos-product-info-field">
+                          <span>Couleur</span>
+                          <strong>
+                            {formatInfoTextValue(
+                              resolveProductTextValue(variant?.color, variant?.couleur)
+                            )}
+                          </strong>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="pos-product-info-empty">{PRODUCT_INFO_FALLBACK}</div>
+                )}
+              </section>
+
+              <section className="pos-product-info-section">
+                <div className="pos-product-info-section-head">
+                  <h4>Dates</h4>
+                </div>
+                <div className="pos-product-info-fields">
+                  <div className="pos-product-info-field">
+                    <span>Date de creation</span>
+                    <strong>{formatInfoDateValue(selectedProductInfoSummary.createdAt)}</strong>
+                  </div>
+                  <div className="pos-product-info-field">
+                    <span>Derniere modification</span>
+                    <strong>{formatInfoDateValue(selectedProductInfoSummary.updatedAt)}</strong>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </div>
+        ) : null}
+      </Modal>
 
       <Modal
         isOpen={variantSelection.isOpen}
