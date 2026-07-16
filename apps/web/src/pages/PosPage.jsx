@@ -234,6 +234,15 @@ const getProductLocationValue = (product) =>
     product?.rayon
   );
 
+const getProductImageValue = (product) =>
+  resolveProductTextValue(
+    product?.imageUrl,
+    product?.image,
+    product?.photoUrl,
+    product?.thumbnailUrl,
+    product?.coverImageUrl
+  );
+
 const getProductPurchasePriceValue = (product) =>
   resolveProductNumberValue(product?.purchasePrice, product?.prixAchat);
 
@@ -1379,10 +1388,12 @@ function PosPage() {
       variantLabel,
       variantSize: variant?.size || variant?.taille || null,
       variantColor: variant?.color || variant?.couleur || null,
+      reference: getProductReferenceValue(product),
       barcode: variant?.barcode || product.barcode || "",
       price: salePrice,
       salePrice,
       stock: Number(variant?.stock ?? product.stock ?? 0),
+      imageUrl: getProductImageValue(product),
       storeName: activeStoreName || product.storeName || null,
       active: product.active,
     };
@@ -2283,16 +2294,58 @@ function PosPage() {
               {items.length ? (
                 <div className="cart-list">
                   {items.map((item) => (
-                    <div className="cart-item" key={item.id}>
-                      <div className="cart-item-main">
+                    <div className="cart-item cart-item-compact" key={item.id}>
+                      {item.imageUrl ? (
+                        <div className="cart-item-media">
+                          <img
+                            className="cart-item-image"
+                            src={item.imageUrl}
+                            alt={item.displayName || item.name}
+                          />
+                        </div>
+                      ) : null}
+
+                      <div className="cart-item-main cart-item-details">
                         <strong>{item.displayName || item.name}</strong>
-                        {item.variantLabel ? (
-                          <span>{item.variantLabel}</span>
+                        {item.variantSize || item.variantColor ? (
+                          <span>
+                            {[
+                              item.variantSize ? `Taille : ${item.variantSize}` : null,
+                              item.variantColor ? `Couleur : ${item.variantColor}` : null,
+                            ]
+                              .filter(Boolean)
+                              .join(" • ")}
+                          </span>
                         ) : null}
-                        <span>{item.storeName || activeStoreName || "Magasin courant"}</span>
+                        {item.reference ? <span>Ref : {item.reference}</span> : null}
+                        {item.barcode ? <span>Code-barres : {item.barcode}</span> : null}
+                        {Number.isFinite(Number(item.stock)) ? (
+                          <span>
+                            Stock restant :{" "}
+                            {roundPosQuantity(Number(item.stock || 0) - Number(item.quantity || 0))}
+                          </span>
+                        ) : null}
                       </div>
 
-                      <div className="cart-quantity-controls">
+                      <div className="cart-price-block cart-unit-price-block">
+                        <label className="field-label" htmlFor={`cart-price-${item.id}`}>
+                          Prix unitaire
+                        </label>
+                        <input
+                          id={`cart-price-${item.id}`}
+                          className="text-input cart-price-input"
+                          type="number"
+                          min="0.01"
+                          step="0.01"
+                          value={priceInputs[item.id] ?? String(item.price ?? "")}
+                          onChange={(event) =>
+                            handlePriceInputChange(item, event.target.value)
+                          }
+                          onBlur={() => handlePriceInputBlur(item)}
+                        />
+                      </div>
+
+                      <div className="cart-quantity-controls cart-quantity-controls-compact">
                         <button
                           className="quantity-button"
                           type="button"
@@ -2337,31 +2390,19 @@ function PosPage() {
                         </button>
                       </div>
 
-                      <div className="cart-price-block">
-                        <label className="field-label" htmlFor={`cart-price-${item.id}`}>
-                          Prix
-                        </label>
-                        <input
-                          id={`cart-price-${item.id}`}
-                          className="text-input cart-price-input"
-                          type="number"
-                          min="0.01"
-                          step="0.01"
-                          value={priceInputs[item.id] ?? String(item.price ?? "")}
-                          onChange={(event) =>
-                            handlePriceInputChange(item, event.target.value)
-                          }
-                          onBlur={() => handlePriceInputBlur(item)}
-                        />
+                      <div className="cart-subtotal-block">
                         <strong>
-                          Sous-total: {formatCurrencyDh(
+                          Sous-total
+                        </strong>
+                        <span className="cart-subtotal-value">
+                          {formatCurrencyDh(
                             roundMoneyValue(Number(item.quantity || 0) * Number(item.price || 0))
                           )}
-                        </strong>
+                        </span>
                       </div>
 
                       <button
-                        className="table-action-button danger"
+                        className="table-action-button danger cart-remove-button"
                         type="button"
                         onClick={() => removeItem(item.id)}
                       >
@@ -2591,6 +2632,34 @@ function PosPage() {
             <div className="pos-product-info-sections">
               <section className="pos-product-info-section">
                 <div className="pos-product-info-section-head">
+                  <h4>Prix</h4>
+                </div>
+                <div className="pos-product-info-fields">
+                  <div className="pos-product-info-field">
+                    <span>Prix d'achat</span>
+                    <strong>{formatInfoCurrencyValue(selectedProductInfoSummary.purchasePrice)}</strong>
+                  </div>
+                  <div className="pos-product-info-field">
+                    <span>Prix de vente</span>
+                    <strong>{formatInfoCurrencyValue(selectedProductInfoSummary.salePrice)}</strong>
+                  </div>
+                  <div className="pos-product-info-field">
+                    <span>Marge en DH</span>
+                    <strong>{formatInfoCurrencyValue(selectedProductInfoSummary.marginValue)}</strong>
+                  </div>
+                  <div className="pos-product-info-field">
+                    <span>Marge en %</span>
+                    <strong>
+                      {selectedProductInfoSummary.marginRate === null
+                        ? PRODUCT_INFO_FALLBACK
+                        : `${selectedProductInfoSummary.marginRate.toFixed(2)} %`}
+                    </strong>
+                  </div>
+                </div>
+              </section>
+
+              <section className="pos-product-info-section">
+                <div className="pos-product-info-section-head">
                   <h4>Informations generales</h4>
                 </div>
                 <div className="pos-product-info-fields">
@@ -2617,34 +2686,6 @@ function PosPage() {
                   <div className="pos-product-info-field pos-product-info-field-wide">
                     <span>Description</span>
                     <strong>{formatInfoTextValue(selectedProductInfoSummary.description)}</strong>
-                  </div>
-                </div>
-              </section>
-
-              <section className="pos-product-info-section">
-                <div className="pos-product-info-section-head">
-                  <h4>Prix</h4>
-                </div>
-                <div className="pos-product-info-fields">
-                  <div className="pos-product-info-field">
-                    <span>Prix d'achat</span>
-                    <strong>{formatInfoCurrencyValue(selectedProductInfoSummary.purchasePrice)}</strong>
-                  </div>
-                  <div className="pos-product-info-field">
-                    <span>Prix de vente</span>
-                    <strong>{formatInfoCurrencyValue(selectedProductInfoSummary.salePrice)}</strong>
-                  </div>
-                  <div className="pos-product-info-field">
-                    <span>Marge en DH</span>
-                    <strong>{formatInfoCurrencyValue(selectedProductInfoSummary.marginValue)}</strong>
-                  </div>
-                  <div className="pos-product-info-field">
-                    <span>Marge en %</span>
-                    <strong>
-                      {selectedProductInfoSummary.marginRate === null
-                        ? PRODUCT_INFO_FALLBACK
-                        : `${selectedProductInfoSummary.marginRate.toFixed(2)} %`}
-                    </strong>
                   </div>
                 </div>
               </section>
