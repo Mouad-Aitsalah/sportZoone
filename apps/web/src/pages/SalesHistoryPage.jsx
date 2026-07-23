@@ -323,7 +323,8 @@ function SalesHistoryPage() {
   const currentUser = getCurrentUser();
   const isAdmin = isAdminRole(currentUser?.role);
   const isCashier = isCashierRole(currentUser?.role);
-  const visibleActiveTab = isCashier ? "commandes" : activeTab;
+  const visibleActiveTab =
+    isCashier && activeTab === "mois" ? "commandes" : activeTab;
   const salesCacheKey = CACHE_KEYS.sales(isCashier ? "cashier-history" : "admin-history");
   const sessionsCacheKey = CACHE_KEYS.salesSessions(
     isCashier ? "cashier-history" : "admin-history"
@@ -336,7 +337,7 @@ function SalesHistoryPage() {
           limit: 500,
         },
       }),
-      isCashier ? Promise.resolve({ data: { data: [] } }) : api.getCashSessions(),
+      api.getCashSessions(),
     ]);
 
     if (salesResult.status === "fulfilled") {
@@ -354,7 +355,7 @@ function SalesHistoryPage() {
     if (salesResult.status === "rejected" && sessionsResult.status === "rejected") {
       throw salesResult.reason;
     }
-  }, [isCashier, salesCacheKey, sessionsCacheKey]);
+  }, [salesCacheKey, sessionsCacheKey]);
 
   useEffect(() => {
     let isMounted = true;
@@ -428,11 +429,11 @@ function SalesHistoryPage() {
       return;
     }
 
-    if (activeTab !== "commandes") {
+    if (activeTab === "mois") {
       setActiveTab("commandes");
     }
 
-    if (selectedSession) {
+    if (activeTab !== "sessions" && selectedSession) {
       setSelectedSession(null);
       setSelectedSessionError("");
     }
@@ -1246,15 +1247,15 @@ function SalesHistoryPage() {
         >
           Commandes
         </button>
-        {!isCashier ? (
-          <>
-            <button
-              className={`period-button ${visibleActiveTab === "sessions" ? "active" : ""}`}
-              type="button"
-              onClick={() => setActiveTab("sessions")}
-            >
-              Sessions
-            </button>
+        <>
+          <button
+            className={`period-button ${visibleActiveTab === "sessions" ? "active" : ""}`}
+            type="button"
+            onClick={() => setActiveTab("sessions")}
+          >
+            Sessions
+          </button>
+          {!isCashier ? (
             <button
               className={`period-button ${visibleActiveTab === "mois" ? "active" : ""}`}
               type="button"
@@ -1262,8 +1263,8 @@ function SalesHistoryPage() {
             >
               Mois
             </button>
-          </>
-        ) : null}
+          ) : null}
+        </>
       </div>
 
       <SectionCard
